@@ -83,7 +83,9 @@ class NmapTool(Tool):
                 self.nm.scan(hosts=target_ip, arguments=args)
                 
                 # Memorizza i risultati.
-                if target_ip in self.nm.all_hosts():
+                scan_result = self.nm.all_hosts()
+                # Verifica se l'IP è presente nei risultati
+                if target_ip in scan_result:
                     # Salva i risultati nel dizionario finale usando il NOME A DOMINIO come chiave
                     self.results[domain] = self.nm[target_ip]
                 else:

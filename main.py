@@ -92,12 +92,16 @@ def main():
             # Nmap potrebbe restituire int o str, così facendo si evitano errori
             
             # Controllo porta 80 (HTTP)
-            if "80" in tcp_ports and tcp_ports["80"].get("state") == "open":
-                web_targets.append(f"http://{domain}")
+            if "80" in tcp_ports:
+                state = tcp_ports["80"].get("state")
+                if state in ["open", "filtered", "open|filtered"]:
+                    web_targets.append(f"http://{domain}")
                 
             # Controllo porta 443 (HTTPS)
-            if "443" in tcp_ports and tcp_ports["443"].get("state") == "open":
-                web_targets.append(f"https://{domain}")
+            if "443" in tcp_ports:
+                state = tcp_ports["443"].get("state")
+                if state in ["open", "filtered", "open|filtered"]:
+                    web_targets.append(f"https://{domain}")
 
     final_results = {}
     
