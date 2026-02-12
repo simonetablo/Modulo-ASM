@@ -93,6 +93,7 @@ class HttpxTool(Tool):
             # Parsing dell'output
             if process.stdout:
                 output_lines = process.stdout.strip().split('\n')
+
                 for line in output_lines:
                     if not line.strip():
                         continue

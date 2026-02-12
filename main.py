@@ -2,8 +2,12 @@ import json
 import argparse
 import sys
 from typing import List, Dict, Any
+from urllib.parse import urlparse
 from tools.nmap_tool import NmapTool
 from tools.httpx_tool import HttpxTool
+from tools.hosting_intel_tool import HostingIntelTool
+from tools.safety_validator_tool import SafetyValidatorTool
+
 
 def main():
     """
@@ -67,11 +71,77 @@ def main():
         print("Errore: Nessun dominio specificato nell'input.", file=sys.stderr)
         sys.exit(1)
 
+    # Analisi Infrastruttura (Cloud, CDN, IP Dinamici)
+    # Esegue prima l'analisi infrastrutturale per identificare eventuali CDN/Cloud/IP Dinamici
+    hostingIntel_tool = HostingIntelTool()
+    hostingIntel_tool.run(domains, params)
+    infra_results_json = hostingIntel_tool.get_results()
+    infra_results = json.loads(infra_results_json)
+    # Estrae mapping dominio -> IP da HostingIntelTool
+    domain_ip_map = infra_results.pop('_ip_map', {})
+
+    # Safety Checks per decidere se e come procedere con le scansioni
+    print(f"Esecuzione safety checks su {len(domains)} target...", file=sys.stderr)
+    safety_validator = SafetyValidatorTool()
+    safety_params = {
+        'infrastructure_data': infra_results,
+        'domain_ip_map': domain_ip_map
+    }
+    safety_validator.run(domains, safety_params)
+    safety_results_json = safety_validator.get_results()
+    safety_results = json.loads(safety_results_json)
+    
+    # Filtra target sicuri e skippa quelli non sicuri
+    safe_targets = []
+    skipped_targets = []
+    
+    for domain in domains:
+        safety = safety_results.get(domain, {})
+        
+        if not safety.get('is_safe_to_scan', False):
+            skipped_targets.append({
+                'target': domain,
+                'reasons': safety.get('skip_reasons', []),
+                'warnings': safety.get('warnings', [])
+            })
+            continue
+        
+        # Adatta parametri di scan basati su safety check
+        scan_params = safety.get('scan_params', {})
+        if scan_params.get('timing') == 'polite':
+            params['timing_template'] = 'polite'
+            params['max_rate'] = scan_params.get('max_rate', 100)
+        
+        safe_targets.append(domain)
+    
+    # Log target skippati
+    if skipped_targets:
+        print(f"\n⚠️  Skipped {len(skipped_targets)} target(s):", file=sys.stderr)
+        for skip in skipped_targets:
+            reasons = ', '.join(skip['reasons'])
+            print(f"  - {skip['target']}: {reasons}", file=sys.stderr)
+            
+    if not safe_targets:
+        print("\n❌ Nessun target sicuro da scansionare.", file=sys.stderr)
+        # Restituisci comunque i risultati con info su target skippati
+        final_results = {}
+        for skip in skipped_targets:
+            final_results[skip['target']] = {
+                'skipped': True,
+                'reasons': skip['reasons'],
+                'infrastructure': infra_results.get(skip['target'], {}),
+                'safety_check': safety_results.get(skip['target'], {})
+            }
+        print(json.dumps(final_results, indent=4))
+        sys.exit(0)
+
+    print(f"\n✅ Proceeding with {len(safe_targets)} safe target(s)", file=sys.stderr)
+
     # Inizializzazione di nmap tool
     nmap_tool = NmapTool()
 
     # Esecuzione del tool: Il metodo run prende la lista dei domini e il dizionario dei parametri
-    nmap_tool.run(domains, params)
+    nmap_tool.run(safe_targets, params)
     
     # Recupero dei risultati di Nmap
     nmap_results_json = nmap_tool.get_results()
@@ -85,27 +155,29 @@ def main():
         if "error" in data:
             continue
             
-        # Controlla la presenza della sezione 'tcp' nei risultati di nmap
+        # Controllo su tutte le porte TCP aperte per servizi HTTP/HTTPS
         if "tcp" in data:
-            tcp_ports = data["tcp"]
-            # Converte le chiavi delle porte in stringhe per confronto sicuro (json keys sono stringhe)
-            # Nmap potrebbe restituire int o str, così facendo si evitano errori
-            
-            # Controllo porta 80 (HTTP)
-            if "80" in tcp_ports:
-                state = tcp_ports["80"].get("state")
-                if state in ["open", "filtered", "open|filtered"]:
-                    web_targets.append(f"http://{domain}")
+            for port, service_info in data["tcp"].items():
+                state = service_info.get("state")
+                name = service_info.get("name", "").lower()
                 
-            # Controllo porta 443 (HTTPS)
-            if "443" in tcp_ports:
-                state = tcp_ports["443"].get("state")
+                # Considera solo porte aperte o filtrate (che potrebbero essere aperte)
                 if state in ["open", "filtered", "open|filtered"]:
-                    web_targets.append(f"https://{domain}")
+                    # Logica per determinare se è un servizio web (http, https, ssl o porte standard)
+                    is_web_service = "http" in name or "https" in name or "ssl" in name or port == "80" or port == "443" or port == "8080" or port == "8443"
+                            
+                    if is_web_service:
+                        # Costruisce l'URL nel formato dominio:porta
+                        url = f"{domain}:{port}"
+                            
+                        if url not in web_targets:
+                            web_targets.append(url)
+            
 
     final_results = {}
-    
-    # Processa i risultati per creare un JSON pulito e strutturato
+
+
+    # Processa i risultati per creare un JSON pulito e strutturato per i target scansionati
     for domain, nmap_data in nmap_results.items():
         if "error" in nmap_data:
             final_results[domain] = {"error": nmap_data["error"]}
@@ -120,9 +192,21 @@ def main():
         domain_result = {
             "ip": ip_address,
             "scan_type": params.get("scan_type", "fast"),
+            "infrastructure": {},
+            "safety_check": {},
             "ports": [],
             "web_recon": {}
         }
+        
+        # Popola info infrastruttura se disponibili (per IP o dominio)
+        if ip_address and ip_address in infra_results:
+             domain_result["infrastructure"] = infra_results[ip_address]
+        elif domain in infra_results:
+             domain_result["infrastructure"] = infra_results[domain]
+             
+        # Popola info safety check
+        if domain in safety_results:
+            domain_result["safety_check"] = safety_results[domain]
         
         # Estrazione info porte
         if "tcp" in nmap_data:
@@ -138,17 +222,34 @@ def main():
         
         final_results[domain] = domain_result
 
+    # Aggiungi info per target skippati nel risultato finale
+    for skip in skipped_targets:
+        final_results[skip['target']] = {
+            'skipped': True,
+            'reasons': skip['reasons'],
+            'warnings': skip.get('warnings', []),
+            'infrastructure': infra_results.get(skip['target'], {}),
+            'safety_check': safety_results.get(skip['target'], {})
+        }
+
     # Se sono state trovate target web, lancia httpx e integra i risultati
     if web_targets:
         print(f"Target web identificati per scansione HTTPX: {web_targets}", file=sys.stderr)
         httpx_tool = HttpxTool()
         httpx_tool.run(web_targets, params)
-        httpx_results = httpx_tool.results
+        httpx_results_json = httpx_tool.get_results()
+        httpx_results = json.loads(httpx_results_json)
         
         # Integra i risultati di httpx nella struttura del dominio corrispondente
         for url, data in httpx_results.items():
-            # Estrae il dominio dall'URL (es. http://example.com -> example.com)
-            domain_key = url.replace("http://", "").replace("https://", "").split("/")[0]
+            # Estrae il dominio dall'URL in modo sicuro.
+            # Se l'URL non ha schema (es. example.com:8080), urlparse necessita di // per riconoscere il netloc.
+            if "://" not in url:
+                parsed_url = urlparse("//" + url)
+            else:
+                parsed_url = urlparse(url)
+                
+            domain_key = parsed_url.hostname
             
             if domain_key in final_results:
                 final_results[domain_key]["web_recon"][url] = data

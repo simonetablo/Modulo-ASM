@@ -1,5 +1,9 @@
 {
-    "domains": ["scanme.nmap.org", "localhost", "wrong.domain.for.error"],
+    "domains": [
+        "scanme.nmap.org",
+        "zero.webappsecurity.com",
+        "wrong.domain.for.error"
+    ],
     "params": {
         "scan_type": "fast"
     }
