@@ -1,4 +1,2 @@
 python-nmap
-ipwhois
-requests
-regex
+dnspython

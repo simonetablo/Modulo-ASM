@@ -17,7 +17,7 @@ class SafetyValidatorTool(Tool):
         Args:
             targets: Lista di IP o domini da validare
             params: Deve contenere:
-                - 'infrastructure_data': Risultati da HostingIntelTool (già risolti)
+                - 'infrastructure_data': Risultati da HostingIntelTool
         """
         infra_data = params.get('infrastructure_data', {})
         domain_ip_map = params.get('domain_ip_map', {})

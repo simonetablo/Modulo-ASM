@@ -71,8 +71,7 @@ def main():
         print("Errore: Nessun dominio specificato nell'input.", file=sys.stderr)
         sys.exit(1)
 
-    # Analisi Infrastruttura (Cloud, CDN, IP Dinamici)
-    # Esegue prima l'analisi infrastrutturale per identificare eventuali CDN/Cloud/IP Dinamici
+    # Analisi infrastrutturale per identificare eventuali CDN/Cloud/IP Dinamici
     hostingIntel_tool = HostingIntelTool()
     hostingIntel_tool.run(domains, params)
     infra_results_json = hostingIntel_tool.get_results()

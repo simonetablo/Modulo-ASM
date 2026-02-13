@@ -38,7 +38,7 @@ class HttpxTool(Tool):
         scan_type = params.get('scan_type', 'fast')
         
         # Argomenti base comuni a tutti i tipi di scansione
-        base_args = ["-json"]
+        base_args = ["-json", "-tls-grab"]
 
         # Configurazione argomenti in base al profilo
         if scan_type == 'fast':
@@ -70,7 +70,7 @@ class HttpxTool(Tool):
         
         # Preparazione input string (uno per riga)
         input_data = "\n".join(domains)
-        
+
         try:
             print(f"Avvio scansione HTTPX su {len(domains)} target con profilo '{scan_type}'", file=sys.stderr)
             

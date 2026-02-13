@@ -1,0 +1,2 @@
+CDNCHECK:   go install -v github.com/projectdiscovery/cdncheck/cmd/cdncheck@latest
+HTTPX:      go install -v github.com/projectdiscovery/httpx/cmd/httpx@latest

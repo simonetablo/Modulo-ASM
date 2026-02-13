@@ -1,62 +1,35 @@
 import socket
 import json
 import sys
+import subprocess
+import shutil
 import dns.resolver
-from ipwhois import IPWhois, IPDefinedError
 from typing import List, Dict, Any
 from .base_tool import Tool
 
 class HostingIntelTool(Tool):
     """
     Tool per l'analisi dell'infrastruttura che ospita gli IP target.
-    Utilizza ipwhois per ASN/Org lookup e Cloud/CDN detection.
+    Utilizza 'cdncheck' (ProjectDiscovery) per identificare Cloud/CDN/WAF.
     """
 
     def __init__(self):
         super().__init__()
-        self.cloud_keywords = self._load_cloud_keywords()
-    
-    def _load_cloud_keywords(self) -> dict:
-        """Carica cloud keywords da file config con fallback a defaults."""
-        import os
-        
-        # Path al file di configurazione
-        config_path = os.path.join(
-            os.path.dirname(__file__), 
-            'config', 
-            'cloud_providers.json'
-        )
-        
-        # Fallback hardcoded se file non esiste
-        default_keywords = {
-            "amazon": "Amazon AWS",
-            "google": "Google Cloud",
-            "microsoft": "Microsoft Azure",
-            "azure": "Microsoft Azure",
-            "cloudflare": "Cloudflare",
-            "fastly": "Fastly CDN",
-            "akamai": "Akamai CDN",
-            "digitalocean": "DigitalOcean",
-            "linode": "Linode",
-            "oracle": "Oracle Cloud",
-            "alibaba": "Alibaba Cloud",
-            "hetzner": "Hetzner Cloud",
-            "ovh": "OVH Cloud",
-            "herokuapp": "Heroku"
-        }
-        
-        try:
-            with open(config_path, 'r', encoding='utf-8') as f:
-                config = json.load(f)
-                return config.get('providers', default_keywords)
-        except (FileNotFoundError, json.JSONDecodeError) as e:
-            print(f"Warning: Unable to load cloud config ({e}). Using defaults.", file=sys.stderr)
-            return default_keywords
+        # Verifica se l'eseguibile cdncheck è nel PATH
+        self.cdncheck_path = shutil.which("cdncheck")
+        if not self.cdncheck_path:
+            print("ATTENZIONE: Eseguibile 'cdncheck' non trovato nel PATH. Il tool fallirà se eseguito.", file=sys.stderr)
+            print("Installalo con: go install -v github.com/projectdiscovery/cdncheck/cmd/cdncheck@latest", file=sys.stderr)
 
     def run(self, domains: List[str], params: Dict[str, Any]) -> None:
         """
-        Esegue l'analisi infrastrutturale sugli IP dei domini elencati.
+        Esegue l'analisi infrastrutturale sugli IP dei domini elencati usando cdncheck.
         """
+        if not self.cdncheck_path:
+            for target in domains:
+                self.results[target] = {"error": "Eseguibile cdncheck non trovato"}
+            return
+
         ips_to_analyze = set()
         domain_ip_map = {} # Mappa dominio -> IP
         
@@ -73,10 +46,12 @@ class HostingIntelTool(Tool):
                 self.results[target] = {"error": "DNS Resolution Failed"}
                 continue
         
-        # Analisi per ogni IP univoco
-        ip_results = {}
-        for ip in ips_to_analyze:
-            ip_results[ip] = self._analyze_ip(ip)
+        if not ips_to_analyze:
+            return
+
+        # Esecuzione di cdncheck sugli IP unici
+        print(f"Esecuzione di cdncheck su {ips_to_analyze}", file=sys.stderr)
+        ip_results = self._run_cdncheck(list(ips_to_analyze))
             
         # Mappa i risultati ai target originali e aggiungi check IP rotation
         for target in domains:
@@ -84,14 +59,86 @@ class HostingIntelTool(Tool):
                 continue
                 
             ip = domain_ip_map.get(target)
-            if ip and ip in ip_results:
-                self.results[target] = ip_results[ip].copy()
+            if ip:
+                # Recupera info da cdncheck, default a {} se non trovato
+                self.results[target] = ip_results.get(ip, {
+                    "is_cloud": False, 
+                    "cloud_provider": None,
+                    "type": "unknown"
+                })
+                
                 # Check per IP dinamici/rotanti
                 rotation_info = self._check_ip_rotation(target)
                 self.results[target].update(rotation_info)
         
-        # Salva mapping IP per uso downstream (non fa parte di infrastructure data)
+        # Salva mapping IP per uso downstream
         self.results['_ip_map'] = domain_ip_map
+
+    def _run_cdncheck(self, ips: List[str]) -> Dict[str, Any]:
+        """
+        Esegue cdncheck su una lista di IP e restituisce un dizionario {ip: info}.
+        """
+        results = {}
+        
+        # cdncheck accetta IP via stdin e restituisce JSON con -j (o -json nelle versioni che lo supportano)
+        cmd = [self.cdncheck_path, "-j"]
+        
+        input_data = "\n".join(ips)
+        try:
+            process = subprocess.run(
+                cmd,
+                input=input_data,
+                capture_output=True,
+                text=True,
+                check=False
+            )
+            
+            # Nota: cdncheck potrebbe scrivere banner su stdout/stderr. Vengono filtrate le righe che sembrano JSON validi.
+
+            # Parsing output JSON (una linea per risultato)
+            for line in process.stdout.strip().split('\n'):
+                line = line.strip()
+                if not line or not line.startswith('{'):
+                    continue
+                try:
+                    data = json.loads(line)
+                    ip = data.get("ip")
+                    if not ip:
+                        continue
+                        
+                    # Mappa i campi di cdncheck alla struttura json finale
+                    
+                    is_cloud = data.get("cloud", False) or data.get("cdn", False) or data.get("waf", False)
+                    
+                    provider = None
+                    item_type = "unknown"
+
+                    if data.get("cdn"):
+                        provider = data.get("cdn_name")
+                        item_type = "cdn"
+                    elif data.get("cloud"):
+                        provider = data.get("cloud_name")
+                        item_type = "cloud"
+                    elif data.get("waf"):
+                        provider = data.get("waf_name")
+                        item_type = "waf"
+                    
+                    if provider:
+                        provider = provider.title() # Formatta il nome del provider con iniziale maiuscola
+
+                    results[ip] = {
+                        "is_cloud": is_cloud,
+                        "cloud_provider": provider,
+                        "type": item_type
+                    }
+                    
+                except json.JSONDecodeError:
+                    pass # Ignora righe non-JSON (banner, log, ecc.)
+
+        except Exception as e:
+            print(f"Eccezione durante esecuzione cdncheck: {str(e)}", file=sys.stderr)
+            
+        return results
     
     def _check_ip_rotation(self, domain: str) -> Dict[str, Any]:
         """
@@ -118,57 +165,14 @@ class HostingIntelTool(Tool):
             result["ip_pool_size"] = len(answers)
             
             # Euristica per IP dinamici:
-            # - TTL < 60s = rotazione frequente (CDN/load balancer)
+            # - TTL < 300s = rotazione frequente (CDN/load balancer)
             # - Pool size > 1 = multiple IP available
-            if result["ttl"] < 60 or result["ip_pool_size"] > 1:
+            if result["ttl"] < 300 or result["ip_pool_size"] > 1:
                 result["is_dynamic"] = True
                 
         except Exception as e:
             # Se DNS query fallisce, assume statico
             # print(f"DEBUG DNS Error for {domain}: {e}", file=sys.stderr)
-            pass
-        
-        return result
-
-    def _analyze_ip(self, ip: str) -> Dict[str, Any]:
-        """
-        Esegue i check specifici su un singolo IP.
-        """
-        result = {
-            "is_cloud": False,
-            "cloud_provider": None,
-            "asn": None,
-            "org": None
-        }
-        
-        # ASN/Org Lookup via IPWhois (Cloud/CDN Detection)
-        try:
-            obj = IPWhois(ip)
-            rdap_result = obj.lookup_rdap(depth=1)
-            
-            asn_desc = rdap_result.get('asn_description', '')
-            asn_org = rdap_result.get('network', {}).get('name', '')
-            
-            result["asn"] = rdap_result.get('asn')
-            result["org"] = asn_org
-            
-            # Analisi keyword su ASN Description e Network Name
-            full_desc = (str(asn_desc) + " " + str(asn_org)).lower()
-            
-            for keyword, provider in self.cloud_keywords.items():
-                if keyword in full_desc:
-                    result["is_cloud"] = True
-                    result["cloud_provider"] = provider
-                    break
-                    
-        except IPDefinedError:
-            # IP privati o riservati
-            result["org"] = "Private/Reserved IP"
-            result["asn"] = "NA"
-            
-        except Exception as e:
-            # Altri errori di lookup
-            # print(f"Errore IPWhois per {ip}: {e}", file=sys.stderr)
             pass
         
         return result
