@@ -1,0 +1,7 @@
+# DNS Resolvers Configuration
+# One resolver per line (IP address or IP:port)
+# These resolvers will be used by all ASM tools for consistent DNS resolution
+
+1.1.1.1
+8.8.8.8
+8.8.4.4

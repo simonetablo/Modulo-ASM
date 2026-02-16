@@ -31,47 +31,95 @@ class NmapTool(Tool):
             print(f"Errore inatteso nell'inizializzazione di nmap: {e}", file=sys.stderr)
             sys.exit(1)
 
-    def run(self, domains: List[str], params: Dict[str, Any]) -> None:
+    def run(self, domains: List[str], params: Dict[str, Any], target_params: Dict[str, Dict] = None) -> None:
         """
         Esegue la scansione Nmap sui domini specificati.
-        Configura gli argomenti di Nmap in base al parametro 'scan_type'.
+        Configura gli argomenti di Nmap in base al parametro 'scan_type' e parametri per-target.
 
         Args:
             domains (List[str]): Lista dei domini target.
             params (Dict[str, Any]): Parametri della scansione. Si aspetta una chiave 'scan_type'
                                      che può essere 'fast', 'accurate' o 'stealth'.
+            target_params (Dict[str, Dict]): Parametri specifici per ogni target (timing, max_rate).
         """
-        # Recupera il tipo di scansione dai parametri, default a 'fast' se non specificato
-        scan_type = params.get('scan_type', 'fast')
+        # Raggruppa i domini in base ai loro parametri di scansione
+        param_groups = self._group_by_params(domains, target_params or {})
         
-        # Definisce gli argomenti da passare a Nmap in base al profilo di scansione scelto
+        print(f"Grouped {len(domains)} domains into {len(param_groups)} parameter groups", file=sys.stderr)
+        
+        # Scansiona ogni gruppo di parametri
+        for group_key, group_domains in param_groups.items():
+            timing, max_rate = group_key
+            
+            # Costruisce gli argomenti nmap per questo gruppo
+            args = self._build_nmap_args(params.get('scan_type', 'fast'), timing, max_rate)
+            
+            print(f"Scanning {len(group_domains)} domains with timing={timing}, max_rate={max_rate}", file=sys.stderr)
+            
+            # Scansiona ogni dominio nel gruppo con gli stessi parametri
+            self._scan_group(group_domains, args)
+    
+    def _group_by_params(self, domains: List[str], target_params: Dict[str, Dict]) -> Dict[tuple, List[str]]:
+        """
+        Raggruppa i domini in base ai loro parametri di scansione.
+        
+        Returns:
+            Dict con chiave (timing, max_rate) e valore lista di domini
+        """
+        groups = {}
+        
+        for domain in domains:
+            params = target_params.get(domain, {})
+            timing = params.get('timing', 'normal')
+            max_rate = params.get('max_rate')
+            
+            key = (timing, max_rate)
+            if key not in groups:
+                groups[key] = []
+            groups[key].append(domain)
+        
+        return groups
+    
+    def _build_nmap_args(self, scan_type: str, timing: str, max_rate: int = None) -> str:
+        """
+        Costruisce gli argomenti nmap basati su scan_type, timing e max_rate.
+        """
+        # Argomenti base basati su scan_type
         if scan_type == 'fast':
-            # -F: Fast mode. Scansiona meno porte rispetto al default (le 100 più comuni).
-            # -T4: Aggressive timing template. Velocizza la scansione riducendo i timeout.
-            args = '-F -T4'
+            args = '-F'
         elif scan_type == 'accurate':
-            # -p-: Scansiona TUTTE le porte (da 1 a 65535).
-            # -sV: Probe open ports. Tenta di determinare la versione del servizio in ascolto.
-            # -sC: Utilizza script di default (equivalente a --script=default) per banner grabbing e vulnerabilità base.
-            # -T3: Normal timing template. Un bilanciamento standard tra velocità e affidabilità.
-            args = '-p- -sV -sC -T3'
+            args = '-p- -sV -sC'
         elif scan_type == 'stealth':
-            # -sS: TCP SYN scan. Non completa la connessione TCP, più difficile da rilevare per alcuni firewall e logging system.
-            # -T2: Polite timing template. Rallenta la scansione per consumare meno banda e risorse, riducendo la probabilità di essere bloccati da IDS/IPS.
-            args = '-sS -T2'
+            args = '-sS'
         else:
-            # Fallback al profilo 'fast' per tipi di scan non riconosciuti
-            args = '-F -T4'
+            args = '-F'
+        
+        # Aggiunge il parametro di timing in base al parametro per-target
+        if timing == 'polite':
+            args += ' -T2'  # Polite timing
+        else:
+            args += ' -T4'  # Aggressive timing (normal)
+        
+        # Aggiunge il parametro di rate limiting se specificato
+        if max_rate:
+            args += f' --max-rate {max_rate}'
+        
+        return args
+    
+    def _scan_group(self, domains: List[str], args: str) -> None:
+        """
+        Scansiona un gruppo di domini con gli stessi argomenti.
+        """
 
         for domain in domains:
             target_ip = None
             try:
-                # Risoluzione DNS per ottenere l'IP del dominio prima della scansione, necessario in quanto python-nmap usa l'IP come chiave nei risultati
+                # Risoluzione DNS per ottenere l'IP del dominio prima della scansione
                 target_ip = socket.gethostbyname(domain)
             except socket.gaierror:
                 print(f"ERRORE: Impossibile risolvere il dominio {domain}", file=sys.stderr)
                 self.results[domain] = {"error": "Impossibile risolvere il nome a dominio (DNS Error)"}
-                continue # Passa al prossimo dominio
+                continue
             except Exception as e:
                 self.results[domain] = {"error": f"Errore durante la risoluzione DNS: {str(e)}"}
                 continue
@@ -82,17 +130,14 @@ class NmapTool(Tool):
                 # Esegue la scansione sull'IP risolto
                 self.nm.scan(hosts=target_ip, arguments=args)
                 
-                # Memorizza i risultati.
+                # Memorizza i risultati
                 scan_result = self.nm.all_hosts()
-                # Verifica se l'IP è presente nei risultati
                 if target_ip in scan_result:
-                    # Salva i risultati nel dizionario finale usando il NOME A DOMINIO come chiave
                     self.results[domain] = self.nm[target_ip]
                 else:
                     self.results[domain] = {"error": "Host scansionato ma nessun risultato restituito (potrebbe essere down o filtrare i pacchetti)"}
                     
             except Exception as e:
-                # Gestione generica delle eccezioni nmap
                 self.results[domain] = {"error": str(e)}
 
     def get_results(self) -> str:

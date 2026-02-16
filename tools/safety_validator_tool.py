@@ -52,17 +52,17 @@ class SafetyValidatorTool(Tool):
         try:
             ip = ipaddress.ip_address(ip_str)
             
+            ip_type = self._classify_ip(ip)
+            
             result = {
                 "is_valid": True,
-                "ip_type": self._classify_ip(ip),
-                "is_scannable": False,
+                "ip_type": ip_type,
+                "is_scannable": ip_type == "public",  # Scansionabile solo se pubblico
                 "reason": None
             }
             
-            # Determina se è scansionabile
-            if ip.is_global:
-                result["is_scannable"] = True
-            else:
+            # Se non è scansionabile, aggiungi il motivo
+            if not result["is_scannable"]:
                 result["reason"] = self._get_non_scannable_reason(ip)
             
             return result
@@ -136,10 +136,15 @@ class SafetyValidatorTool(Tool):
             "max_rate": None
         }
         
-        # Se è cloud/CDN, usa timing polite
-        if infra.get('is_cloud') or infra.get('has_waf'):
+        type_details = infra.get('type_details', {})
+        
+        # Priority-based: WAF is most sensitive, then CDN/Cloud
+        if "waf" in type_details:
             params['timing'] = 'polite'
-            params['max_rate'] = 100
+            params['max_rate'] = 25  # Very conservative for WAF
+        elif "cdn" in type_details or "cloud" in type_details:
+            params['timing'] = 'polite'
+            params['max_rate'] = 50
         
         return params
     

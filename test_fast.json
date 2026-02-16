@@ -1,10 +1,15 @@
 {
-    "domains": [
+    "target_list": [
         "scanme.nmap.org",
         "zero.webappsecurity.com",
         "wrong.domain.for.error"
     ],
     "params": {
-        "scan_type": "fast"
+        "scan_type": "fast",
+        "rotation_monitor": {
+            "enabled": true,
+            "interval_seconds": 10,
+            "duration_seconds": 30
+        }
     }
 }

@@ -13,13 +13,23 @@ class HostingIntelTool(Tool):
     Utilizza 'cdncheck' (ProjectDiscovery) per identificare Cloud/CDN/WAF.
     """
 
-    def __init__(self):
+    def __init__(self, dns_resolvers: List[str] = None):
+        """
+        Inizializza il tool con DNS resolvers configurabili.
+        
+        Args:
+            dns_resolvers: Lista di DNS resolver IPs. Default: ['1.1.1.1', '8.8.8.8', '8.8.4.4']
+        """
         super().__init__()
+        self.dns_resolvers = dns_resolvers or ['1.1.1.1', '8.8.8.8', '8.8.4.4']
+        self.results = {}
+        
         # Verifica se l'eseguibile cdncheck è nel PATH
         self.cdncheck_path = shutil.which("cdncheck")
         if not self.cdncheck_path:
             print("ATTENZIONE: Eseguibile 'cdncheck' non trovato nel PATH. Il tool fallirà se eseguito.", file=sys.stderr)
             print("Installalo con: go install -v github.com/projectdiscovery/cdncheck/cmd/cdncheck@latest", file=sys.stderr)
+
 
     def run(self, domains: List[str], params: Dict[str, Any]) -> None:
         """
@@ -63,7 +73,6 @@ class HostingIntelTool(Tool):
                 # Recupera info da cdncheck, default a {} se non trovato
                 self.results[target] = ip_results.get(ip, {
                     "is_cloud": False, 
-                    "cloud_provider": None,
                     "type": "unknown"
                 })
                 
@@ -106,30 +115,24 @@ class HostingIntelTool(Tool):
                     if not ip:
                         continue
                         
-                    # Mappa i campi di cdncheck alla struttura json finale
+                    # Detect all infrastructure types and their providers
+                    type_details = {}
                     
-                    is_cloud = data.get("cloud", False) or data.get("cdn", False) or data.get("waf", False)
-                    
-                    provider = None
-                    item_type = "unknown"
-
                     if data.get("cdn"):
-                        provider = data.get("cdn_name")
-                        item_type = "cdn"
-                    elif data.get("cloud"):
-                        provider = data.get("cloud_name")
-                        item_type = "cloud"
-                    elif data.get("waf"):
-                        provider = data.get("waf_name")
-                        item_type = "waf"
+                        type_details["cdn"] = data.get("cdn_name", "Unknown").title()
                     
-                    if provider:
-                        provider = provider.title() # Formatta il nome del provider con iniziale maiuscola
-
+                    if data.get("cloud"):
+                        type_details["cloud"] = data.get("cloud_name", "Unknown").title()
+                    
+                    if data.get("waf"):
+                        type_details["waf"] = data.get("waf_name", "Unknown").title()
+                    
+                    # Indicates if any special infrastructure is detected (CDN/Cloud/WAF)
+                    has_infrastructure = len(type_details) > 0
+                    
                     results[ip] = {
-                        "is_cloud": is_cloud,
-                        "cloud_provider": provider,
-                        "type": item_type
+                        "has_infrastructure": has_infrastructure,
+                        "type_details": type_details  # {"cdn": "Cloudflare", "waf": "Cloudflare"}
                     }
                     
                 except json.JSONDecodeError:
@@ -142,7 +145,7 @@ class HostingIntelTool(Tool):
     
     def _check_ip_rotation(self, domain: str) -> Dict[str, Any]:
         """
-        Verifica se il dominio usa IP dinamici/rotanti.
+        Verifica euristicamente se il dominio usa IP dinamici/rotanti.
         Usa TTL e numero di A record come indicatori.
         """
         
@@ -154,9 +157,10 @@ class HostingIntelTool(Tool):
         
         try:
             resolver = dns.resolver.Resolver(configure=False)
-            resolver.nameservers = ['8.8.8.8', '8.8.4.4', '1.1.1.1']
+            resolver.nameservers = self.dns_resolvers
             resolver.timeout = 5
             resolver.lifetime = 5
+
             
             answers = resolver.resolve(domain, 'A')
 

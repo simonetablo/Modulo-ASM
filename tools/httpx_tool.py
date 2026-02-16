@@ -21,73 +21,124 @@ class HttpxTool(Tool):
         if not self.httpx_path:
             print("ATTENZIONE: Eseguibile 'httpx' non trovato nel PATH. Il tool fallirà se eseguito.", file=sys.stderr)
 
-    def run(self, domains: List[str], params: Dict[str, Any]) -> None:
+    def run(self, domains: List[str], params: Dict[str, Any], target_params: Dict[str, Dict] = None) -> None:
         """
         Esegue la scansione HTTPX sui target specificati.
         
         Args:
             domains (List[str]): Lista dei target (URL completi, es. http://example.com).
             params (Dict[str, Any]): Parametri della scansione.
+            target_params (Dict[str, Dict]): Parametri specifici per ogni target (timing, max_rate).
         """
         if not self.httpx_path:
             for domain in domains:
                 self.results[domain] = {"error": "Eseguibile httpx non trovato"}
             return
 
-        # Recupera il tipo di scansione dai parametri, default a 'fast' se non specificato
-        scan_type = params.get('scan_type', 'fast')
+        if not self.httpx_path:
+            for domain in domains:
+                self.results[domain] = {"error": "Eseguibile httpx non trovato"}
+            return
         
-        # Argomenti base comuni a tutti i tipi di scansione
-        base_args = ["-json", "-tls-grab"]
-
-        # Configurazione argomenti in base al profilo
-        if scan_type == 'fast':
-            # -title: Estrae il titolo della pagina
-            # -status-code: Mostra il codice di risposta HTTP
-            # -tech-detect: Rileva le tecnologie in uso (versione base)
-            profile_args = ["-title", "-status-code", "-tech-detect"]
-        elif scan_type == 'accurate':
-            # -title: Estrae il titolo
-            # -status-code: Codice HTTP
-            # -tech-detect: Rileva tecnologie
-            # -follow-redirects: Segue i reindirizzamenti
-            # -random-agent: Usa User-Agent casuali per evitare blocchi semplici
-            profile_args = ["-title", "-status-code", "-tech-detect", "-follow-redirects", "-random-agent"]
-        elif scan_type == 'stealth':
-            # -title: Titolo pagina
-            # -status-code: Codice HTTP
-            # -random-agent: User-Agent casuale
-            profile_args = ["-title", "-status-code", "-random-agent"]
-        else:
-            # Fallback al profilo 'fast' per tipi di scan non riconosciuti
-            profile_args = ["-title", "-status-code", "-tech-detect"]
-
         if not domains:
             return
-
-        # Costruzione del comando completo. I target vengono passati via stdin per efficienza e concorrenza
-        cmd = [self.httpx_path] + base_args + profile_args
         
+        # Raggruppa i target in base ai loro parametri di scansione
+        param_groups = self._group_by_params(domains, target_params or {})
+        
+        print(f"Grouped {len(domains)} targets into {len(param_groups)} parameter groups for httpx", file=sys.stderr)
+        
+        # Scansiona ogni gruppo di parametri
+        for group_key, group_domains in param_groups.items():
+            timing, max_rate = group_key
+            
+            # Costruisce il comando httpx per questo gruppo
+            cmd = self._build_httpx_cmd(params, timing, max_rate)
+            
+            print(f"Scanning {len(group_domains)} targets with httpx (timing={timing}, max_rate={max_rate})", file=sys.stderr)
+            
+            # Scansiona questo gruppo
+            self._scan_group(group_domains, cmd)
+    
+    def _group_by_params(self, domains: List[str], target_params: Dict[str, Dict]) -> Dict[tuple, List[str]]:
+        """
+        Raggruppa i target in base ai loro parametri di scansione.
+        Estrae il dominio base dall'URL (es. "example.com:443" -> "example.com").
+        """
+        groups = {}
+        
+        for target in domains:
+            # Estrae il dominio base dall'URL (es. "example.com:443" -> "example.com")
+            base_domain = target.split(':')[0].replace('http://', '').replace('https://', '')
+            
+            params = target_params.get(base_domain, {})
+            timing = params.get('timing', 'normal')
+            max_rate = params.get('max_rate')
+            
+            key = (timing, max_rate)
+            if key not in groups:
+                groups[key] = []
+            groups[key].append(target)
+        
+        return groups
+    
+    def _build_httpx_cmd(self, params: Dict[str, Any], timing: str, max_rate: int = None) -> List[str]:
+        """
+        Costruisce il comando httpx basato su scan_type, timing e max_rate.
+        """
+        scan_type = params.get('scan_type', 'fast')
+        
+        # Argomenti base
+        cmd = [self.httpx_path, "-json", "-tls-grab"]
+        
+        # Argomenti specifici del profilo (senza -random-agent, aggiunto separatamente in base a timing/stealth)
+        if scan_type == 'fast':
+            cmd.extend(["-title", "-status-code", "-tech-detect"])
+        elif scan_type == 'accurate':
+            cmd.extend(["-title", "-status-code", "-tech-detect", "-follow-redirects"])
+        elif scan_type == 'stealth':
+            cmd.extend(["-title", "-status-code"])  # Minimal flags for stealth
+        else:
+            cmd.extend(["-title", "-status-code", "-tech-detect"])
+        
+        # Aggiunge -random-agent per stealth mode o polite timing (per evitare detection/blocking)
+        if scan_type == 'stealth' or timing == 'polite':
+            cmd.append("-random-agent")
+        
+        # Aggiunge timeout per polite timing
+        if timing == 'polite':
+            cmd.extend(["-timeout", "10"])
+        
+        # Aggiunge rate limiting
+        if max_rate:
+            cmd.extend(["-rate-limit", str(max_rate)])
+        
+        return cmd
+
+    
+    def _scan_group(self, domains: List[str], cmd: List[str]) -> None:
+        """
+        Scansiona un gruppo di target con lo stesso comando httpx.
+        """
+
         # Preparazione input string (uno per riga)
         input_data = "\n".join(domains)
 
         try:
-            print(f"Avvio scansione HTTPX su {len(domains)} target con profilo '{scan_type}'", file=sys.stderr)
-            
-            # Esecuzione del processo unico
+            # Esecuzione del processo
             process = subprocess.run(
                 cmd,
                 input=input_data,
                 capture_output=True,
                 text=True,
-                check=False 
+                check=False
             )
             
             if process.returncode != 0:
-                print(f"Errore esecuzione httpx globale: {process.stderr}", file=sys.stderr)
-                # In caso di crash globale, segna errore su tutti i domini non ancora processati
+                print(f"Errore esecuzione httpx: {process.stderr}", file=sys.stderr)
                 for target in domains:
-                    self.results[target] = {"error": f"Errore esecuzione httpx: {process.stderr.strip()}"}
+                    if target not in self.results:  # Don't overwrite existing results
+                        self.results[target] = {"error": f"Errore esecuzione httpx: {process.stderr.strip()}"}
                 return
 
             # Parsing dell'output

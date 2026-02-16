@@ -1,5 +1,5 @@
 {
-        "domains": ["scanme.nmap.org", "localhost", "wrong.domain.for.error"],
+        "target_list": ["scanme.nmap.org", "localhost", "wrong.domain.for.error"],
         "params": {
             "scan_type": "accurate"
         }

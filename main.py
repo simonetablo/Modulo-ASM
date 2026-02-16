@@ -7,6 +7,32 @@ from tools.nmap_tool import NmapTool
 from tools.httpx_tool import HttpxTool
 from tools.hosting_intel_tool import HostingIntelTool
 from tools.safety_validator_tool import SafetyValidatorTool
+from tools.ip_rotation_tool import IPRotationTool
+
+
+def load_dns_resolvers() -> List[str]:
+    """
+    Carica i DNS resolvers dal file resolvers.txt.
+    Se il file non viene trovato o è vuoto, utilizza i DNS resolvers di fallback.
+    
+    Returns:
+        List of DNS resolver IPs
+    """
+    FALLBACK_RESOLVERS = ['1.1.1.1', '8.8.8.8', '8.8.4.4']
+    
+    try:
+        with open('resolvers.txt', 'r') as f:
+            resolvers = [line.strip() for line in f if line.strip() and not line.strip().startswith('#')]
+            if resolvers:
+                print(f"Loaded {len(resolvers)} DNS resolvers from resolvers.txt", file=sys.stderr)
+                return resolvers
+    except FileNotFoundError:
+        print("resolvers.txt not found, using fallback resolvers", file=sys.stderr)
+    except Exception as e:
+        print(f"Error reading resolvers.txt: {e}, using fallback resolvers", file=sys.stderr)
+    
+    return FALLBACK_RESOLVERS
+
 
 
 def main():
@@ -64,15 +90,18 @@ def main():
         sys.exit(1)
 
     # Estrazione dei domini e dei parametri dal JSON
-    domains = data.get('domains', [])
+    domains = data.get('target_list', [])
     params = data.get('params', {})
 
     if not domains:
         print("Errore: Nessun dominio specificato nell'input.", file=sys.stderr)
         sys.exit(1)
 
+    # Load DNS resolvers from file or use fallback
+    dns_resolvers = load_dns_resolvers()
+
     # Analisi infrastrutturale per identificare eventuali CDN/Cloud/IP Dinamici
-    hostingIntel_tool = HostingIntelTool()
+    hostingIntel_tool = HostingIntelTool(dns_resolvers=dns_resolvers)
     hostingIntel_tool.run(domains, params)
     infra_results_json = hostingIntel_tool.get_results()
     infra_results = json.loads(infra_results_json)
@@ -80,21 +109,34 @@ def main():
     domain_ip_map = infra_results.pop('_ip_map', {})
 
     # Safety Checks per decidere se e come procedere con le scansioni
-    print(f"Esecuzione safety checks su {len(domains)} target...", file=sys.stderr)
+    # Filtra i domini validi (senza errori infrastrutturali) per il safety check
+    valid_domains_for_safety = [d for d in domains if "error" not in infra_results.get(d, {})]
+    
+    print(f"Esecuzione safety checks su {len(valid_domains_for_safety)} target validi (filtrati {len(domains) - len(valid_domains_for_safety)} errori)...", file=sys.stderr)
     safety_validator = SafetyValidatorTool()
     safety_params = {
         'infrastructure_data': infra_results,
         'domain_ip_map': domain_ip_map
     }
-    safety_validator.run(domains, safety_params)
+    safety_validator.run(valid_domains_for_safety, safety_params)
     safety_results_json = safety_validator.get_results()
     safety_results = json.loads(safety_results_json)
     
     # Filtra target sicuri e skippa quelli non sicuri
     safe_targets = []
     skipped_targets = []
+    target_params = {}  # Store per-target scan parameters
     
     for domain in domains:
+        # Prima controlla se ci sono stati errori infrastrutturali
+        if "error" in infra_results.get(domain, {}):
+            skipped_targets.append({
+                'target': domain,
+                'reasons': [f"Infrastructure Error: {infra_results[domain]['error']}"],
+                'warnings': []
+            })
+            continue
+
         safety = safety_results.get(domain, {})
         
         if not safety.get('is_safe_to_scan', False):
@@ -105,11 +147,9 @@ def main():
             })
             continue
         
-        # Adatta parametri di scan basati su safety check
+        # Store per-target scan parameters
         scan_params = safety.get('scan_params', {})
-        if scan_params.get('timing') == 'polite':
-            params['timing_template'] = 'polite'
-            params['max_rate'] = scan_params.get('max_rate', 100)
+        target_params[domain] = scan_params
         
         safe_targets.append(domain)
     
@@ -136,11 +176,19 @@ def main():
 
     print(f"\n✅ Proceeding with {len(safe_targets)} safe target(s)", file=sys.stderr)
 
+    # Avvio monitoraggio rotazione IP in background
+    # Il monitor userà i DNS resolver centralizzati
+    iprotation_monitor = IPRotationTool(dns_resolvers=dns_resolvers)
+    iprotation_monitor.start_monitoring(safe_targets, interval=10, duration=30)
+
+
+
     # Inizializzazione di nmap tool
     nmap_tool = NmapTool()
 
-    # Esecuzione del tool: Il metodo run prende la lista dei domini e il dizionario dei parametri
-    nmap_tool.run(safe_targets, params)
+    # Esecuzione del tool con parametri per-target
+    nmap_tool.run(safe_targets, params, target_params=target_params)
+
     
     # Recupero dei risultati di Nmap
     nmap_results_json = nmap_tool.get_results()
@@ -193,9 +241,11 @@ def main():
             "scan_type": params.get("scan_type", "fast"),
             "infrastructure": {},
             "safety_check": {},
+            "scan_params_applied": target_params.get(domain, {}),  # Per-target scan parameters
             "ports": [],
             "web_recon": {}
         }
+
         
         # Popola info infrastruttura se disponibili (per IP o dominio)
         if ip_address and ip_address in infra_results:
@@ -235,9 +285,10 @@ def main():
     if web_targets:
         print(f"Target web identificati per scansione HTTPX: {web_targets}", file=sys.stderr)
         httpx_tool = HttpxTool()
-        httpx_tool.run(web_targets, params)
+        httpx_tool.run(web_targets, params, target_params=target_params)
         httpx_results_json = httpx_tool.get_results()
         httpx_results = json.loads(httpx_results_json)
+
         
         # Integra i risultati di httpx nella struttura del dominio corrispondente
         for url, data in httpx_results.items():
@@ -257,6 +308,16 @@ def main():
 
     else:
         print("Nessun target web (80/443) trovato per scansione HTTPX addizionale.", file=sys.stderr)
+    
+    # Tutti gli scan sono completati, ferma il monitoraggio IP rotation
+    iprotation_monitor.stop()  # Questo ora attende la durata minima E il completamento del thread
+    rotation_results_json = iprotation_monitor.get_results()
+    rotation_results = json.loads(rotation_results_json)
+    
+    # Integra i risultati di IP rotation nella struttura finale
+    for domain, rotation_data in rotation_results.items():
+        if domain in final_results:
+            final_results[domain]["ip_rotation"] = rotation_data
     
     # Output dei risultati finali aggregati
     print(json.dumps(final_results, indent=4))

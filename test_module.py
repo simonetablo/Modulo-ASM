@@ -6,7 +6,7 @@ import os
 def test_run():
     # Input di test
     input_data = {
-        "domains": ["scanme.nmap.org"],
+        "target_list": ["scanme.nmap.org"],
         "params": {
             "scan_type": "fast"
         }
