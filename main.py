@@ -8,6 +8,7 @@ from tools.httpx_tool import HttpxTool
 from tools.hosting_intel_tool import HostingIntelTool
 from tools.safety_validator_tool import SafetyValidatorTool
 from tools.ip_rotation_tool import IPRotationTool
+from tools.subdomain_enum_tool import SubdomainEnumTool
 
 
 def load_dns_resolvers() -> List[str]:
@@ -99,6 +100,25 @@ def main():
 
     # Load DNS resolvers from file or use fallback
     dns_resolvers = load_dns_resolvers()
+
+    # Step 1: Subdomain Enumeration (Active)
+    # Eseguita come primo step per espandere la superficie di attacco
+    subdomain_tool = SubdomainEnumTool(dns_resolvers=dns_resolvers)
+    subdomain_tool.run(domains, params)
+    subdomain_results_json = subdomain_tool.get_results()
+    subdomain_results = json.loads(subdomain_results_json)
+    
+    # Espande la lista dei domini con quelli trovati
+    discovered_domains = set(domains) # Include i semi originali
+    for seed, result in subdomain_results.items():
+        if "discovered_subdomains" in result:
+            discovered_domains.update(result["discovered_subdomains"])
+    
+    expanded_domains = list(discovered_domains)
+    print(f"Subdomain enumeration completata. Target espansi da {len(domains)} a {len(expanded_domains)}.", file=sys.stderr)
+    
+    # Da qui in poi usiamo expanded_domains invece dei domini originali
+    domains = expanded_domains
 
     # Analisi infrastrutturale per identificare eventuali CDN/Cloud/IP Dinamici
     hostingIntel_tool = HostingIntelTool(dns_resolvers=dns_resolvers)
@@ -242,6 +262,7 @@ def main():
             "infrastructure": {},
             "safety_check": {},
             "scan_params_applied": target_params.get(domain, {}),  # Per-target scan parameters
+            "subdomain_enum": {},
             "ports": [],
             "web_recon": {}
         }
@@ -318,6 +339,12 @@ def main():
     for domain, rotation_data in rotation_results.items():
         if domain in final_results:
             final_results[domain]["ip_rotation"] = rotation_data
+
+    # Integra i risultati della subdomain enumeration (se applicabile a questo dominio)
+    # Nota: salviamo i risultati per i domini "seed" originali
+    for seed, result in subdomain_results.items():
+        if seed in final_results:
+            final_results[seed]["subdomain_enum"] = result
     
     # Output dei risultati finali aggregati
     print(json.dumps(final_results, indent=4))

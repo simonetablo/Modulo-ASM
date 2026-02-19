@@ -1,2 +1,4 @@
 CDNCHECK:   go install -v github.com/projectdiscovery/cdncheck/cmd/cdncheck@latest
 HTTPX:      go install -v github.com/projectdiscovery/httpx/cmd/httpx@latest
+PUREDNS:    go install github.com/d3mondev/puredns/v2@latest
+MASSDNS:    (C++ tool) git clone https://github.com/blechschmidt/massdns.git && make
