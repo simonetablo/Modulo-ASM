@@ -1,4 +1,7 @@
 CDNCHECK:   go install -v github.com/projectdiscovery/cdncheck/cmd/cdncheck@latest
 HTTPX:      go install -v github.com/projectdiscovery/httpx/cmd/httpx@latest
 PUREDNS:    go install github.com/d3mondev/puredns/v2@latest
-MASSDNS:    (C++ tool) git clone https://github.com/blechschmidt/massdns.git && make
+MASSDNS:    git clone https://github.com/blechschmidt/massdns.git && make
+ALTERX:     go install -v github.com/subfinder/alterx@latest
+NMAP:       sudo apt install nmap
+FFUF:       go install -v github.com/ffuf/ffuf/v2@latest

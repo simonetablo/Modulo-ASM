@@ -11,6 +11,14 @@ class NmapTool(Tool):
     Utilizza la libreria `python-nmap` per eseguire scansioni di rete.
     """
 
+    SCAN_PROFILES = {
+        "fast": "-F",
+        "comprehensive": "-p- -sV -sC -o",
+        "accurate": "-p- -sV -sC -o",
+        "stealth": "-sS",
+        "noisy": "-p- -T5 -o --script default,discovery,safe"
+    }
+
     def __init__(self):
         """
         Inizializza il NmapTool.
@@ -45,14 +53,14 @@ class NmapTool(Tool):
         # Raggruppa i domini in base ai loro parametri di scansione
         param_groups = self._group_by_params(domains, target_params or {})
         
-        print(f"Grouped {len(domains)} domains into {len(param_groups)} parameter groups", file=sys.stderr)
+        print(f"Grouped {len(domains)} domains into {len(param_groups)} parameter groups for nmap", file=sys.stderr)
         
         # Scansiona ogni gruppo di parametri
         for group_key, group_domains in param_groups.items():
             timing, max_rate = group_key
             
             # Costruisce gli argomenti nmap per questo gruppo
-            args = self._build_nmap_args(params.get('scan_type', 'fast'), timing, max_rate)
+            args = self._build_args(params.get('scan_type', 'fast'), timing, max_rate)
             
             print(f"Scanning {len(group_domains)} domains with timing={timing}, max_rate={max_rate}", file=sys.stderr)
             
@@ -80,25 +88,22 @@ class NmapTool(Tool):
         
         return groups
     
-    def _build_nmap_args(self, scan_type: str, timing: str, max_rate: int = None) -> str:
+    def _build_args(self, scan_type: str, timing: str, max_rate: int = None) -> str:
         """
         Costruisce gli argomenti nmap basati su scan_type, timing e max_rate.
         """
-        # Argomenti base basati su scan_type
-        if scan_type == 'fast':
-            args = '-F'
-        elif scan_type == 'accurate':
-            args = '-p- -sV -sC'
-        elif scan_type == 'stealth':
-            args = '-sS'
-        else:
-            args = '-F'
+        scan_type = scan_type.lower()
+        if scan_type not in self.SCAN_PROFILES:
+            scan_type = 'fast'
+            
+        args = self.SCAN_PROFILES[scan_type]
         
-        # Aggiunge il parametro di timing in base al parametro per-target
-        if timing == 'polite':
-            args += ' -T2'  # Polite timing
-        else:
-            args += ' -T4'  # Aggressive timing (normal)
+        # Aggiunge il parametro di timing se non esplicitamente definito nel profilo (es. noisy ha -T5)
+        if "-T" not in args:
+            if timing == 'polite':
+                args += ' -T2'  # Polite timing
+            else:
+                args += ' -T4'  # Aggressive timing (normal)
         
         # Aggiunge il parametro di rate limiting se specificato
         if max_rate:

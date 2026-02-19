@@ -11,6 +11,14 @@ class HttpxTool(Tool):
     Esegue scansioni web su porte HTTP/HTTPS scoperte.
     """
 
+    SCAN_PROFILES = {
+        "fast": ["-title", "-status-code", "-tech-detect"],
+        "comprehensive": ["-title", "-status-code", "-tech-detect", "-follow-redirects"],
+        "accurate": ["-title", "-status-code", "-tech-detect", "-follow-redirects"],  # Alias per compatibilità
+        "stealth": ["-title", "-status-code"],
+        "noisy": ["-title", "-status-code", "-tech-detect", "-follow-redirects", "-v"]
+    }
+
     def __init__(self):
         """
         Inizializza l'HttpxTool.
@@ -53,7 +61,7 @@ class HttpxTool(Tool):
             timing, max_rate = group_key
             
             # Costruisce il comando httpx per questo gruppo
-            cmd = self._build_httpx_cmd(params, timing, max_rate)
+            cmd = self._build_args(params, timing, max_rate)
             
             print(f"Scanning {len(group_domains)} targets with httpx (timing={timing}, max_rate={max_rate})", file=sys.stderr)
             
@@ -82,24 +90,19 @@ class HttpxTool(Tool):
         
         return groups
     
-    def _build_httpx_cmd(self, params: Dict[str, Any], timing: str, max_rate: int = None) -> List[str]:
+    def _build_args(self, params: Dict[str, Any], timing: str, max_rate: int = None) -> List[str]:
         """
         Costruisce il comando httpx basato su scan_type, timing e max_rate.
         """
-        scan_type = params.get('scan_type', 'fast')
-        
+        scan_type = params.get('scan_type', 'fast').lower()
+        if scan_type not in self.SCAN_PROFILES:
+            scan_type = 'fast'
+            
         # Argomenti base
         cmd = [self.httpx_path, "-json", "-tls-grab"]
         
-        # Argomenti specifici del profilo (senza -random-agent, aggiunto separatamente in base a timing/stealth)
-        if scan_type == 'fast':
-            cmd.extend(["-title", "-status-code", "-tech-detect"])
-        elif scan_type == 'accurate':
-            cmd.extend(["-title", "-status-code", "-tech-detect", "-follow-redirects"])
-        elif scan_type == 'stealth':
-            cmd.extend(["-title", "-status-code"])  # Minimal flags for stealth
-        else:
-            cmd.extend(["-title", "-status-code", "-tech-detect"])
+        # Estende con i flag del profilo selezionato
+        cmd.extend(self.SCAN_PROFILES[scan_type])
         
         # Aggiunge -random-agent per stealth mode o polite timing (per evitare detection/blocking)
         if scan_type == 'stealth' or timing == 'polite':

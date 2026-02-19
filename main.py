@@ -8,7 +8,9 @@ from tools.httpx_tool import HttpxTool
 from tools.hosting_intel_tool import HostingIntelTool
 from tools.safety_validator_tool import SafetyValidatorTool
 from tools.ip_rotation_tool import IPRotationTool
+from tools.permutation_tool import PermutationTool
 from tools.subdomain_enum_tool import SubdomainEnumTool
+from tools.vhost_enum_tool import VhostEnumTool
 
 
 def load_dns_resolvers() -> List[str]:
@@ -114,8 +116,61 @@ def main():
         if "discovered_subdomains" in result:
             discovered_domains.update(result["discovered_subdomains"])
     
+    # --- Step 1.5: Permutation Scanning (AlterX + PureDNS Resolve) ---
+    # Genera variazioni dei domini scoperti e le valida.
+
+    permutation_tool = PermutationTool()
+    # Passiamo opzioni per limitare le permutazioni
+    perm_params_base = {"flags": []} 
+    if params.get("scan_type") == "fast":
+        perm_params_base["flags"].extend(["-limit", "5000"]) 
+    
+    all_valid_permutations = set()
+
+    for seed, result in subdomain_results.items():
+        if "error" in result:
+             continue
+             
+        # Costruiamo la lista di input per questo seed: il seed stesso + i sottodomini scoperti
+        group_domains = [seed]
+        if "discovered_subdomains" in result:
+            group_domains.extend(result["discovered_subdomains"])
+            
+        # Skip se non ci sono domini sufficienti (almeno 1)
+        if not group_domains:
+            continue
+        
+        # Esegui alterx sul gruppo
+        permutation_tool.run(group_domains, perm_params_base)
+        perm_results = json.loads(permutation_tool.get_results())
+
+        # Raccogli candidati per questo gruppo
+        candidates = set()
+
+        if perm_results:
+            for p_seed, p_res in perm_results.items():
+                if "permutations" in p_res:
+                    candidates.update(p_res["permutations"])
+        
+        candidates -= set(discovered_domains) # Rimuovi tutto ciò che è già noto globalmente
+        
+        if candidates:
+            subdomain_tool.run(list(candidates), {"method": "resolve"})
+            resolve_results = json.loads(subdomain_tool.get_results())
+            
+            if "resolved_domains" in resolve_results:
+                valid = resolve_results["resolved_domains"]["domains"]
+                print(f"  [+] {len(valid)} new valid subdomains for {seed}", file=sys.stderr)
+                all_valid_permutations.update(valid)
+        
+    if all_valid_permutations:
+        print(f"Permutation Scanning Total: trovati {len(all_valid_permutations)} nuovi sottodomini validi.", file=sys.stderr)
+        discovered_domains.update(all_valid_permutations)
+    else:
+        print("Nessuna nuova permutazione valida trovata.", file=sys.stderr)
+
     expanded_domains = list(discovered_domains)
-    print(f"Subdomain enumeration completata. Target espansi da {len(domains)} a {len(expanded_domains)}.", file=sys.stderr)
+    print(f"Subdomain enumeration (Bruteforce + Permutations) completata. Target espansi da {len(domains)} a {len(expanded_domains)}.", file=sys.stderr)
     
     # Da qui in poi usiamo expanded_domains invece dei domini originali
     domains = expanded_domains
@@ -264,7 +319,8 @@ def main():
             "scan_params_applied": target_params.get(domain, {}),  # Per-target scan parameters
             "subdomain_enum": {},
             "ports": [],
-            "web_recon": {}
+            "web_recon": {},
+            "vhost_enum": {}
         }
 
         
@@ -329,6 +385,23 @@ def main():
 
     else:
         print("Nessun target web (80/443) trovato per scansione HTTPX addizionale.", file=sys.stderr)
+    
+    # Step 5: Virtual Host Enumeration
+    # Fuzzing dell'header Host: per scoprire vhost nascosti sugli stessi IP
+    if web_targets:
+        print(f"\nAvvio VHost Enumeration su {len(web_targets)} target web...", file=sys.stderr)
+        vhost_tool = VhostEnumTool()
+        vhost_tool.run(web_targets, params, target_params=target_params)
+        vhost_results = json.loads(vhost_tool.get_results())
+        
+        # Integra risultati nella struttura finale
+        for url, vhost_data in vhost_results.items():
+            # Estrae il dominio base dal target (es. "example.com:443" -> "example.com")
+            base_domain = url.split(':')[0].replace('http://', '').replace('https://', '')
+            if base_domain in final_results:
+                final_results[base_domain]["vhost_enum"][url] = vhost_data
+    else:
+        print("Nessun target web per VHost Enumeration.", file=sys.stderr)
     
     # Tutti gli scan sono completati, ferma il monitoraggio IP rotation
     iprotation_monitor.stop()  # Questo ora attende la durata minima E il completamento del thread

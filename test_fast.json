@@ -1,8 +1,8 @@
 {
     "target_list": [
-        "scanme.nmap.org",
         "zero.webappsecurity.com",
-        "wrong.domain.for.error"
+        "wrong.domain.for.error",
+        "scanme.nmap.org"
     ],
     "params": {
         "scan_type": "fast",
