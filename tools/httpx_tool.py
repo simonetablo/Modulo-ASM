@@ -42,11 +42,6 @@ class HttpxTool(Tool):
             for domain in domains:
                 self.results[domain] = {"error": "Eseguibile httpx non trovato"}
             return
-
-        if not self.httpx_path:
-            for domain in domains:
-                self.results[domain] = {"error": "Eseguibile httpx non trovato"}
-            return
         
         if not domains:
             return

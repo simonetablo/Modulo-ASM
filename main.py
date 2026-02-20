@@ -11,32 +11,27 @@ from tools.ip_rotation_tool import IPRotationTool
 from tools.permutation_tool import PermutationTool
 from tools.subdomain_enum_tool import SubdomainEnumTool
 from tools.vhost_enum_tool import VhostEnumTool
+from tools.origin_ip_tool import OriginIpTool
+from tools.dns_manager_tool import DnsManagerTool
 
 
-def load_dns_resolvers() -> List[str]:
+def group_domains_by_base(domains: List[str]) -> Dict[str, List[str]]:
     """
-    Carica i DNS resolvers dal file resolvers.txt.
-    Se il file non viene trovato o è vuoto, utilizza i DNS resolvers di fallback.
-    
-    Returns:
-        List of DNS resolver IPs
+    Raggruppa una lista di domini in base alla loro root (dominio base).
+    (es. api.azienda.com -> azienda.com)
     """
-    FALLBACK_RESOLVERS = ['1.1.1.1', '8.8.8.8', '8.8.4.4']
-    
-    try:
-        with open('resolvers.txt', 'r') as f:
-            resolvers = [line.strip() for line in f if line.strip() and not line.strip().startswith('#')]
-            if resolvers:
-                print(f"Loaded {len(resolvers)} DNS resolvers from resolvers.txt", file=sys.stderr)
-                return resolvers
-    except FileNotFoundError:
-        print("resolvers.txt not found, using fallback resolvers", file=sys.stderr)
-    except Exception as e:
-        print(f"Error reading resolvers.txt: {e}, using fallback resolvers", file=sys.stderr)
-    
-    return FALLBACK_RESOLVERS
-
-
+    groups = {}
+    for d in domains:
+        parts = d.split('.')
+        if len(parts) >= 2:
+            base = f"{parts[-2]}.{parts[-1]}"
+        else:
+            base = d
+            
+        if base not in groups:
+            groups[base] = []
+        groups[base].append(d)
+    return groups
 
 def main():
     """
@@ -100,12 +95,17 @@ def main():
         print("Errore: Nessun dominio specificato nell'input.", file=sys.stderr)
         sys.exit(1)
 
-    # Load DNS resolvers from file or use fallback
-    dns_resolvers = load_dns_resolvers()
+    # Gestione centralizzata dei DNS Resolver
+    dns_manager = DnsManagerTool()
+    # Puredns e tool asincroni in Go possono gestire agevolmente migliaia di resolver
+    all_dns_resolvers = dns_manager.get_resolvers(max_count=0)
+    # I tool basati su librerie Python native (dns.resolver) lavorano meglio a batch più piccoli
+    python_dns_resolvers = dns_manager.get_resolvers(max_count=50)
 
     # Step 1: Subdomain Enumeration (Active)
     # Eseguita come primo step per espandere la superficie di attacco
-    subdomain_tool = SubdomainEnumTool(dns_resolvers=dns_resolvers)
+    # Da notare: passiamo tutti i resolver (all_dns_resolvers) per massimizzare la velocità
+    subdomain_tool = SubdomainEnumTool(dns_resolvers=all_dns_resolvers)
     subdomain_tool.run(domains, params)
     subdomain_results_json = subdomain_tool.get_results()
     subdomain_results = json.loads(subdomain_results_json)
@@ -174,14 +174,24 @@ def main():
     
     # Da qui in poi usiamo expanded_domains invece dei domini originali
     domains = expanded_domains
+    print(f"Domains: {domains}", file=sys.stderr)
+    # Calcola il raggruppamento domini centralizzato
+    grouped_domains = group_domains_by_base(domains)
 
     # Analisi infrastrutturale per identificare eventuali CDN/Cloud/IP Dinamici
-    hostingIntel_tool = HostingIntelTool(dns_resolvers=dns_resolvers)
+    hostingIntel_tool = HostingIntelTool(dns_resolvers=python_dns_resolvers)
     hostingIntel_tool.run(domains, params)
     infra_results_json = hostingIntel_tool.get_results()
     infra_results = json.loads(infra_results_json)
-    # Estrae mapping dominio -> IP da HostingIntelTool
-    domain_ip_map = infra_results.pop('_ip_map', {})
+
+    # Esegue ricerca Origin IPs
+    origin_ip_tool = OriginIpTool(dns_resolvers=python_dns_resolvers)
+    origin_ip_tool.run(params, infra_results, grouped_domains=grouped_domains)
+    origin_results_json = origin_ip_tool.get_results()
+    origin_results = json.loads(origin_results_json)
+
+    # Estrae mapping dominio -> IP da HostingIntelTool tramite get invece che pop
+    domain_ip_map = infra_results.get('_ip_map', {})
 
     # Safety Checks per decidere se e come procedere con le scansioni
     # Filtra i domini validi (senza errori infrastrutturali) per il safety check
@@ -252,14 +262,14 @@ def main():
     print(f"\n✅ Proceeding with {len(safe_targets)} safe target(s)", file=sys.stderr)
 
     # Avvio monitoraggio rotazione IP in background
-    # Il monitor userà i DNS resolver centralizzati
-    iprotation_monitor = IPRotationTool(dns_resolvers=dns_resolvers)
+    # Il monitor userà i DNS resolver limitati per Python
+    iprotation_monitor = IPRotationTool(dns_resolvers=python_dns_resolvers)
     iprotation_monitor.start_monitoring(safe_targets, interval=10, duration=30)
 
 
 
-    # Inizializzazione di nmap tool
-    nmap_tool = NmapTool()
+    # Inizializzazione di nmap tool usando il resolver centralizzato Python
+    nmap_tool = NmapTool(dns_resolvers=python_dns_resolvers)
 
     # Esecuzione del tool con parametri per-target
     nmap_tool.run(safe_targets, params, target_params=target_params)
@@ -386,12 +396,20 @@ def main():
     else:
         print("Nessun target web (80/443) trovato per scansione HTTPX addizionale.", file=sys.stderr)
     
+    # Creiamo un reverse mapping rapido per VhostEnumTool (domain -> base_domain)
+    domain_to_base = {}
+    for base, subs in grouped_domains.items():
+        for sub in subs:
+            domain_to_base[sub] = base
+        # Assicuriamoci che anche il base punti a sé stesso
+        domain_to_base[base] = base
+
     # Step 5: Virtual Host Enumeration
     # Fuzzing dell'header Host: per scoprire vhost nascosti sugli stessi IP
     if web_targets:
         print(f"\nAvvio VHost Enumeration su {len(web_targets)} target web...", file=sys.stderr)
-        vhost_tool = VhostEnumTool()
-        vhost_tool.run(web_targets, params, target_params=target_params)
+        vhost_tool = VhostEnumTool(dns_resolvers=python_dns_resolvers)
+        vhost_tool.run(web_targets, params, target_params=target_params, origin_results=origin_results, domain_to_base=domain_to_base)
         vhost_results = json.loads(vhost_tool.get_results())
         
         # Integra risultati nella struttura finale

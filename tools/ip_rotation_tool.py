@@ -3,6 +3,7 @@ import threading
 import time
 import json
 import sys
+import random
 import dns.resolver
 from typing import List, Dict, Any
 from datetime import datetime
@@ -116,11 +117,14 @@ class IPRotationTool(Tool):
         Risolve un dominio usando DNS resolver configurato e traccia l'IP nella cronologia.
         """
         try:
-            # Usa i DNS resolver configurati invece di quelli di sistema
+            # Usa i DNS resolver configurati scegliendoli in modo random per evitare rate-limiting e fail continui sullo stesso nodo.
             resolver = dns.resolver.Resolver(configure=False)
-            resolver.nameservers = self.dns_resolvers
-            resolver.timeout = 5
-            resolver.lifetime = 5
+            
+            # Parametri hardcoded appositi per un monitoraggio furtivo/veloce
+            fallback_count = min(2, len(self.dns_resolvers))
+            resolver.nameservers = random.sample(self.dns_resolvers, fallback_count) if self.dns_resolvers else ['8.8.8.8']
+            resolver.timeout = 3.0
+            resolver.lifetime = 6.0
             
             answers = resolver.resolve(domain, 'A')
             ip = str(answers[0])  # Prende il primo IP

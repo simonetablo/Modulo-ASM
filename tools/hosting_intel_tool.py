@@ -1,8 +1,8 @@
-import socket
 import json
 import sys
 import subprocess
 import shutil
+import random
 import dns.resolver
 from typing import List, Dict, Any
 from .base_tool import Tool
@@ -43,16 +43,37 @@ class HostingIntelTool(Tool):
         ips_to_analyze = set()
         domain_ip_map = {} # Mappa dominio -> IP
         
-        print(f"Avvio analisi infrastruttura su {len(domains)} target...", file=sys.stderr)
+        scan_type = params.get("scan_type", "fast").lower()
+
+        # Determina fallback e timeout in base al profilo di scansione
+        if scan_type in ("fast", "noisy"):
+            fallback_count = min(2, len(self.dns_resolvers))
+            timeout_sec = 2.0
+        elif scan_type == "stealth":
+            fallback_count = min(1, len(self.dns_resolvers))
+            timeout_sec = 10.0
+        else: # accurate, comprehensive
+            fallback_count = min(4, len(self.dns_resolvers))
+            timeout_sec = 5.0
+            
+        print(f"Avvio analisi infrastruttura su {len(domains)} target (fallback={fallback_count}, timeout={timeout_sec}s)...", file=sys.stderr)
 
         for target in domains:
-            # Risolve dominio in IP
+            # Risolve dominio in IP aggirando i DNS di sistema (socket) e usando il nostro pool dinamico
             try:
-                ip = socket.gethostbyname(target)
+                resolver = dns.resolver.Resolver(configure=False)
+                # Selezione randomica/round-robin per load balancing e fail-fast
+                resolver.nameservers = random.sample(self.dns_resolvers, fallback_count) if self.dns_resolvers else ['8.8.8.8']
+                resolver.timeout = timeout_sec
+                resolver.lifetime = timeout_sec * fallback_count
+                
+                answers = resolver.resolve(target, 'A')
+                ip = str(answers[0]) # Prende il primo record A
+                
                 ips_to_analyze.add(ip)
                 domain_ip_map[target] = ip
-            except socket.gaierror:
-                print(f"Errore: Impossibile risolvere {target} per analisi infrastruttura", file=sys.stderr)
+            except (dns.resolver.NXDOMAIN, dns.resolver.NoAnswer, dns.resolver.Timeout, dns.exception.DNSException) as e:
+                # print(f"DEBUG DNS Resolution fail for {target}: {e}", file=sys.stderr)
                 self.results[target] = {"error": "DNS Resolution Failed"}
                 continue
         
@@ -72,8 +93,8 @@ class HostingIntelTool(Tool):
             if ip:
                 # Recupera info da cdncheck, default a {} se non trovato
                 self.results[target] = ip_results.get(ip, {
-                    "is_cloud": False, 
-                    "type": "unknown"
+                    "has_infrastructure": False,
+                    "type_details": {}
                 })
                 
                 # Check per IP dinamici/rotanti
@@ -156,10 +177,15 @@ class HostingIntelTool(Tool):
         }
         
         try:
+            # Per IP rotation detection passiamo sempre parametri conservativi (fast)
+            # per non rallentare l'euristica generale post-risoluzione.
+            fallback_count = min(2, len(self.dns_resolvers))
+            timeout_sec = 2.0
+            
             resolver = dns.resolver.Resolver(configure=False)
-            resolver.nameservers = self.dns_resolvers
-            resolver.timeout = 5
-            resolver.lifetime = 5
+            resolver.nameservers = random.sample(self.dns_resolvers, fallback_count) if self.dns_resolvers else ['8.8.8.8']
+            resolver.timeout = timeout_sec
+            resolver.lifetime = timeout_sec * fallback_count
 
             
             answers = resolver.resolve(domain, 'A')
