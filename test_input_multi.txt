@@ -1,3 +1,0 @@
-scanme.nmap.org
-zero.webappsecurity.com
-wrong.domain.for.error

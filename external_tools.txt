@@ -5,3 +5,4 @@ MASSDNS:    git clone https://github.com/blechschmidt/massdns.git && make
 ALTERX:     go install -v github.com/subfinder/alterx@latest
 NMAP:       sudo apt install nmap
 FFUF:       go install -v github.com/ffuf/ffuf/v2@latest
+NUCLEI:     go install -v github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest

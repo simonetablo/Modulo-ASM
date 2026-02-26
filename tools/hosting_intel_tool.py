@@ -4,6 +4,8 @@ import subprocess
 import shutil
 import random
 import dns.resolver
+import dns.exception
+import concurrent.futures
 from typing import List, Dict, Any
 from .base_tool import Tool
 
@@ -58,8 +60,7 @@ class HostingIntelTool(Tool):
             
         print(f"Avvio analisi infrastruttura su {len(domains)} target (fallback={fallback_count}, timeout={timeout_sec}s)...", file=sys.stderr)
 
-        for target in domains:
-            # Risolve dominio in IP aggirando i DNS di sistema (socket) e usando il nostro pool dinamico
+        def resolve_domain(target):
             try:
                 resolver = dns.resolver.Resolver(configure=False)
                 # Selezione randomica/round-robin per load balancing e fail-fast
@@ -69,13 +70,22 @@ class HostingIntelTool(Tool):
                 
                 answers = resolver.resolve(target, 'A')
                 ip = str(answers[0]) # Prende il primo record A
-                
-                ips_to_analyze.add(ip)
-                domain_ip_map[target] = ip
-            except (dns.resolver.NXDOMAIN, dns.resolver.NoAnswer, dns.resolver.Timeout, dns.exception.DNSException) as e:
-                # print(f"DEBUG DNS Resolution fail for {target}: {e}", file=sys.stderr)
-                self.results[target] = {"error": "DNS Resolution Failed"}
-                continue
+                return target, ip, None
+            except (dns.resolver.NXDOMAIN, dns.resolver.NoAnswer, dns.resolver.Timeout, dns.exception.DNSException):
+                return target, None, "DNS Resolution Failed"
+            except Exception:
+                return target, None, "DNS Resolution Failed"
+
+        max_workers = min(50, len(domains) if domains else 1)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+            future_to_domain = {executor.submit(resolve_domain, target): target for target in domains}
+            for future in concurrent.futures.as_completed(future_to_domain):
+                target, ip, error = future.result()
+                if error:
+                    self.results[target] = {"error": error}
+                else:
+                    ips_to_analyze.add(ip)
+                    domain_ip_map[target] = ip
         
         if not ips_to_analyze:
             return
@@ -85,21 +95,31 @@ class HostingIntelTool(Tool):
         ip_results = self._run_cdncheck(list(ips_to_analyze))
             
         # Mappa i risultati ai target originali e aggiungi check IP rotation
-        for target in domains:
+        def process_target_rotation(target):
             if target in self.results and "error" in self.results[target]:
-                continue
+                return target, None
                 
             ip = domain_ip_map.get(target)
-            if ip:
-                # Recupera info da cdncheck, default a {} se non trovato
-                self.results[target] = ip_results.get(ip, {
-                    "has_infrastructure": False,
-                    "type_details": {}
-                })
+            if not ip:
+                return target, None
                 
-                # Check per IP dinamici/rotanti
-                rotation_info = self._check_ip_rotation(target)
-                self.results[target].update(rotation_info)
+            # Recupera info da cdncheck, default a {} se non trovato
+            info = ip_results.get(ip, {
+                "has_infrastructure": False,
+                "type_details": {}
+            })
+            
+            # Check per IP dinamici/rotanti
+            rotation_info = self._check_ip_rotation(target)
+            info.update(rotation_info)
+            return target, info
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+            future_to_target = {executor.submit(process_target_rotation, target): target for target in domains}
+            for future in concurrent.futures.as_completed(future_to_target):
+                target, info = future.result()
+                if info is not None:
+                    self.results[target] = info
         
         # Salva mapping IP per uso downstream
         self.results['_ip_map'] = domain_ip_map

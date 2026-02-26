@@ -12,11 +12,11 @@ class HttpxTool(Tool):
     """
 
     SCAN_PROFILES = {
-        "fast": ["-title", "-status-code", "-tech-detect"],
-        "comprehensive": ["-title", "-status-code", "-tech-detect", "-follow-redirects"],
-        "accurate": ["-title", "-status-code", "-tech-detect", "-follow-redirects"],  # Alias per compatibilità
-        "stealth": ["-title", "-status-code"],
-        "noisy": ["-title", "-status-code", "-tech-detect", "-follow-redirects", "-v"]
+        "fast": ["-title", "-status-code", "-tech-detect", "-favicon", "-hash", "sha256"],
+        "accurate": ["-title", "-status-code", "-tech-detect", "-jarm", "-favicon", "-hash", "sha256"],
+        "comprehensive": ["-title", "-status-code", "-tech-detect", "-follow-redirects", "-jarm", "-favicon", "-hash", "sha256", "-method", "-cname", "-asn"],
+        "stealth": ["-title", "-status-code", "-hash", "sha256"],
+        "noisy": ["-title", "-status-code", "-tech-detect", "-follow-redirects", "-jarm", "-favicon", "-hash", "sha256", "-v"]
     }
 
     def __init__(self):

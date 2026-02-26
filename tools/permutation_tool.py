@@ -17,7 +17,7 @@ class PermutationTool(Tool):
         Inizializza il tool e verifica le dipendenze.
         """
         super().__init__()
-        self.alterx_path = shutil.which("alterx") or "/home/simone/go/bin/alterx"
+        self.alterx_path = shutil.which("alterx") or os.path.expanduser("~/go/bin/alterx")
         
         if not os.path.exists(self.alterx_path) and not shutil.which("alterx"):
              print(f"ATTENZIONE: Eseguibile 'alterx' non trovato in {self.alterx_path} né nel PATH.", file=sys.stderr)

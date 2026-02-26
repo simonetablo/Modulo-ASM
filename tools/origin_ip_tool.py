@@ -56,11 +56,7 @@ class OriginIpTool(Tool):
             if is_base_cdn:
                 self.results[base_domain]["is_behind_cdn"] = True
                 
-            # Recuperiamo l'IP map da infra_results per avere l'IP del dominio
-            # Lo passo tramite params o uso una logica di risoluzione semplice
-            # Per semplificare assumiamo che infra_results possa avere il dato o iteriamo su subdomains
-            
-            # Usiamo domain_ip_map esposto sopra
+            # Usiamo domain_ip_map passato da infra_results (originato da HostingIntelTool)
             for sub in subdomains:
                 sub_infra = infra_results.get(sub, {})
                 ip = domain_ip_map.get(sub)

@@ -2,7 +2,7 @@ import os
 import sys
 import time
 import urllib.request
-from typing import List
+from typing import List, Dict, Any
 from .base_tool import Tool
 
 class DnsManagerTool(Tool):
@@ -23,7 +23,7 @@ class DnsManagerTool(Tool):
         # Assicurati che la directory wordlists esista
         os.makedirs("wordlists", exist_ok=True)
 
-    def run(self, params: dict = None) -> None:
+    def run(self, domains: List[str] = None, params: Dict[str, Any] = None) -> None:
         pass # Metodo inutilizzato in questo contesto, presente per conformità alla classe Tool
 
     def get_resolvers(self, max_count: int = 50) -> List[str]:

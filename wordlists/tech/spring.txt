@@ -1,0 +1,8 @@
+actuator/
+actuator/env
+actuator/health
+actuator/info
+actuator/metrics
+actuator/mappings
+application.properties
+application.yml

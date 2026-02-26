@@ -36,6 +36,10 @@ def test_run():
             output_json = json.loads(result.stdout)
             print("Successfully parsed output JSON.")
             print("Scan Results Keys:", output_json.keys())
+            
+            with open('test_output.json', 'w') as out_f:
+                json.dump(output_json, out_f, indent=4)
+            print("Output saved to test_output.json")
         except json.JSONDecodeError:
             print("Failed to parse output as JSON.")
             

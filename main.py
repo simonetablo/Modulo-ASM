@@ -12,6 +12,8 @@ from tools.permutation_tool import PermutationTool
 from tools.subdomain_enum_tool import SubdomainEnumTool
 from tools.vhost_enum_tool import VhostEnumTool
 from tools.origin_ip_tool import OriginIpTool
+from tools.nuclei_tool import NucleiTool
+from tools.content_discovery_tool import ContentDiscoveryTool
 from tools.dns_manager_tool import DnsManagerTool
 
 
@@ -268,11 +270,29 @@ def main():
 
 
 
-    # Inizializzazione di nmap tool usando il resolver centralizzato Python
-    nmap_tool = NmapTool(dns_resolvers=python_dns_resolvers)
+    # Estrazione IP unici dai safe_targets per nmap (Deduplicazione di Rete)
+    unique_ips_for_nmap = set()
+    ip_to_domains = {}  # Mappa inversa IP -> lista di domini per riassociare i risultati
+    
+    for domain in safe_targets:
+        ip = domain_ip_map.get(domain)
+        if ip:
+            unique_ips_for_nmap.add(ip)
+            if ip not in ip_to_domains:
+                ip_to_domains[ip] = []
+            ip_to_domains[ip].append(domain)
+        else:
+            print(f"ATTENZIONE: Nessun IP trovato in mappa per {domain}, il target verrà ignorato dalla scansione porte.", file=sys.stderr)
 
-    # Esecuzione del tool con parametri per-target
-    nmap_tool.run(safe_targets, params, target_params=target_params)
+    print(f"\n✅ Nmap deduplication recap: {len(safe_targets)} domini ridotti a {len(unique_ips_for_nmap)} IP unici.", file=sys.stderr)
+
+    # Inizializzazione di nmap tool
+    nmap_tool = NmapTool()
+
+    # Esecuzione del tool con IP unici deduplicati
+    # NOTA: Passiamo params generici perché Nmap qui scansiona IPs, non domini. 
+    # I target_params complessi a livello dominio non si applicano direttamente raggruppando per IP.
+    nmap_tool.run(list(unique_ips_for_nmap), params)
 
     
     # Recupero dei risultati di Nmap
@@ -280,9 +300,9 @@ def main():
     nmap_results = json.loads(nmap_results_json)
     
     # Analisi dei risultati per identificare target web (porte 80/443 aperte)
-    web_targets = []
+    web_targets = set()
         
-    for domain, data in nmap_results.items():
+    for nmap_ip, data in nmap_results.items():
         # Salta se c'è stato un errore su questo dominio
         if "error" in data:
             continue
@@ -299,26 +319,22 @@ def main():
                     is_web_service = "http" in name or "https" in name or "ssl" in name or port == "80" or port == "443" or port == "8080" or port == "8443"
                             
                     if is_web_service:
-                        # Costruisce l'URL nel formato dominio:porta
-                        url = f"{domain}:{port}"
-                            
-                        if url not in web_targets:
-                            web_targets.append(url)
+                        # Dobbiamo risalire ai domini originali che puntavano a questo IP
+                        associated_domains = ip_to_domains.get(nmap_ip, []) # nmap_ip in realtà è un IP
+
+                        for original_domain in associated_domains:
+                            url = f"{original_domain}:{port}"
+                            web_targets.add(url)
             
 
     final_results = {}
 
 
-    # Processa i risultati per creare un JSON pulito e strutturato per i target scansionati
-    for domain, nmap_data in nmap_results.items():
-        if "error" in nmap_data:
-            final_results[domain] = {"error": nmap_data["error"]}
-            continue
-
-        # Recupera l'IP
-        ip_address = None
-        if "addresses" in nmap_data and "ipv4" in nmap_data["addresses"]:
-            ip_address = nmap_data["addresses"]["ipv4"]
+    # Processa i risultati per creare un JSON pulito e strutturato per i target scansionati originali
+    # Iteriamo sui safe_targets originali, non sui risultati Nmap basati su IP
+    for domain in safe_targets:
+        # Recupera l'IP del dominio
+        ip_address = domain_ip_map.get(domain)
         
         # Struttura base per il dominio
         domain_result = {
@@ -330,9 +346,16 @@ def main():
             "subdomain_enum": {},
             "ports": [],
             "web_recon": {},
+            "advanced_fingerprint": [],
+            "content_discovery": [],
             "vhost_enum": {}
         }
 
+        # Recupera inmap_data associato a questo IP, se esistente
+        nmap_data = nmap_results.get(ip_address, {}) if ip_address else {}
+
+        if "error" in nmap_data:
+            domain_result["error"] = nmap_data["error"]
         
         # Popola info infrastruttura se disponibili (per IP o dominio)
         if ip_address and ip_address in infra_results:
@@ -344,7 +367,7 @@ def main():
         if domain in safety_results:
             domain_result["safety_check"] = safety_results[domain]
         
-        # Estrazione info porte
+        # Estrazione info porte dal result aggregato sull'IP
         if "tcp" in nmap_data:
             for port, info in nmap_data["tcp"].items():
                 port_info = {
@@ -370,15 +393,21 @@ def main():
 
     # Se sono state trovate target web, lancia httpx e integra i risultati
     if web_targets:
-        print(f"Target web identificati per scansione HTTPX: {web_targets}", file=sys.stderr)
+        print(f"Target web identificati per scansione HTTPX: {len(web_targets)} target univoci riassociati ai domini.", file=sys.stderr)
         httpx_tool = HttpxTool()
-        httpx_tool.run(web_targets, params, target_params=target_params)
+        httpx_tool.run(list(web_targets), params, target_params=target_params)
         httpx_results_json = httpx_tool.get_results()
         httpx_results = json.loads(httpx_results_json)
 
         
         # Integra i risultati di httpx nella struttura del dominio corrispondente
+        # ed estrai contemporaneamente la lista degli URL *vivi* da passare a Nuclei
+        alive_web_targets = []
         for url, data in httpx_results.items():
+            # Controlla se la richiesta httpx e' andata a buon fine (nessun mapping di 'error')
+            if "error" not in data:
+                 alive_web_targets.append(url)
+                 
             # Estrae il dominio dall'URL in modo sicuro.
             # Se l'URL non ha schema (es. example.com:8080), urlparse necessita di // per riconoscere il netloc.
             if "://" not in url:
@@ -390,11 +419,56 @@ def main():
             
             if domain_key in final_results:
                 final_results[domain_key]["web_recon"][url] = data
-            else:
-                 pass
+
+        # === Integrazione Content Discovery (Web Fuzzing Context-Aware) ===
+        if alive_web_targets:
+            c_discovery_tool = ContentDiscoveryTool()
+            c_discovery_tool.run(alive_web_targets, params, httpx_results=httpx_results, target_params=target_params)
+            c_discovery_json = c_discovery_tool.get_results()
+            c_discovery_results = json.loads(c_discovery_json)
+            
+            # Integra i file e le directory trovate nel JSON
+            for url, findings in c_discovery_results.items():
+                if "://" not in url:
+                    parsed_url = urlparse("//" + url)
+                else:
+                    parsed_url = urlparse(url)
+                
+                domain_key = parsed_url.hostname
+                
+                if domain_key in final_results:
+                    if "error" in findings:
+                        final_results[domain_key]["content_discovery"].append({"error": findings["error"]})
+                    elif isinstance(findings, list) and len(findings) > 0:
+                        final_results[domain_key]["content_discovery"].extend(findings)
+
+        # === Integrazione Nuclei (Advanced Fingerprinting) ===
+        if alive_web_targets:
+            print(f"\nAvvio Advanced Fingerprinting con Nuclei su {len(alive_web_targets)} target web vivi...", file=sys.stderr)
+            nuclei_tool = NucleiTool()
+            # Nuclei elabora la lista url validati da Httpx 
+            nuclei_tool.run(alive_web_targets, params, target_params=target_params)
+            nuclei_results_json = nuclei_tool.get_results()
+            nuclei_results = json.loads(nuclei_results_json)
+            
+            # Integra i findings di Nuclei all'interno della struttura json
+            for url, findings in nuclei_results.items():
+                if "://" not in url:
+                    parsed_url = urlparse("//" + url)
+                else:
+                    parsed_url = urlparse(url)
+                
+                domain_key = parsed_url.hostname
+                
+                if domain_key in final_results:
+                    if "error" in findings:
+                        final_results[domain_key]["advanced_fingerprint"].append({"error": findings["error"]})
+                    elif isinstance(findings, list) and len(findings) > 0:
+                        # Estendi la lista vuota di array con i discovery di nuclei per questo URL
+                        final_results[domain_key]["advanced_fingerprint"].extend(findings)
 
     else:
-        print("Nessun target web (80/443) trovato per scansione HTTPX addizionale.", file=sys.stderr)
+        print("Nessun target web (80/443) trovato per scansione HTTPX e Nuclei addizionale.", file=sys.stderr)
     
     # Creiamo un reverse mapping rapido per VhostEnumTool (domain -> base_domain)
     domain_to_base = {}
@@ -409,7 +483,7 @@ def main():
     if web_targets:
         print(f"\nAvvio VHost Enumeration su {len(web_targets)} target web...", file=sys.stderr)
         vhost_tool = VhostEnumTool(dns_resolvers=python_dns_resolvers)
-        vhost_tool.run(web_targets, params, target_params=target_params, origin_results=origin_results, domain_to_base=domain_to_base)
+        vhost_tool.run(list(web_targets), params, target_params=target_params, origin_results=origin_results, domain_to_base=domain_to_base, domain_ip_map=domain_ip_map)
         vhost_results = json.loads(vhost_tool.get_results())
         
         # Integra risultati nella struttura finale

@@ -23,6 +23,10 @@ class SubdomainEnumTool(Tool):
             "wordlist": "wordlists/test_subs.txt",
             "flags": ["-l", "5000"]
         },
+        "comprehensive": {
+            "wordlist": "wordlists/test_subs.txt",
+            "flags": ["-l", "500"] 
+        },
         "stealth": {
             "wordlist": "wordlists/test_subs.txt",
             "flags": ["-l", "100"]
