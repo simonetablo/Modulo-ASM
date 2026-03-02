@@ -51,6 +51,8 @@ def main():
     parser = argparse.ArgumentParser(description='ASM Module Backend - Modulo di scansione')
     parser.add_argument('--input', type=str, help='Stringa JSON di input', required=False)
     parser.add_argument('--file', type=str, help='Percorso al file JSON di input', required=False)
+    parser.add_argument('--use-doh', action='store_true', help='Utilizza DNS-over-HTTPS per validazione finale (Lento ma utile per ruotare proxy o non usare UDP)')
+    parser.add_argument('--dns-proxy', type=str, help='Percorso a un file txt contenente una lista di proxy (HTTP/SOCKS5) da usare per DoH')
 
     args = parser.parse_args()
 
@@ -92,6 +94,7 @@ def main():
     # Estrazione dei domini e dei parametri dal JSON
     domains = data.get('target_list', [])
     params = data.get('params', {})
+    passive_subdomains = data.get('passive_subdomains', {})
 
     if not domains:
         print("Errore: Nessun dominio specificato nell'input.", file=sys.stderr)
@@ -121,9 +124,12 @@ def main():
     # --- Step 1.5: Permutation Scanning (AlterX + PureDNS Resolve) ---
     # Genera variazioni dei domini scoperti e le valida.
 
-    permutation_tool = PermutationTool()
     # Passiamo opzioni per limitare le permutazioni
-    perm_params_base = {"flags": []} 
+    perm_params_base = {
+        "flags": [],
+        "scan_type": params.get("scan_type", "fast"),
+        "max_wildcards": params.get("max_wildcards", 5)
+    } 
     if params.get("scan_type") == "fast":
         perm_params_base["flags"].extend(["-limit", "5000"]) 
     
@@ -133,10 +139,22 @@ def main():
         if "error" in result:
              continue
              
-        # Costruiamo la lista di input per questo seed: il seed stesso + i sottodomini scoperti
+        # Costruiamo la lista di input per questo seed: il seed stesso, 
+        # i sottodomini scoperti via bruteforce E quelli passivi forniti dall'utente
+        # Questo garantisce ad AlterX il massimo contesto aziendale.
         group_domains = [seed]
+        
+        # Aggiungiamo quelli ricavati dalla fase attiva (bruteforce puredns)
         if "discovered_subdomains" in result:
             group_domains.extend(result["discovered_subdomains"])
+            
+        # Aggiungiamo i passivi passati dall'utente per questo preciso root domain
+        passive_for_seed = passive_subdomains.get(seed, [])
+        if passive_for_seed:
+            group_domains.extend(passive_for_seed)
+            
+        # Rimuoviamo duplicati per alleggerire AlterX
+        group_domains = list(set(group_domains))
             
         # Skip se non ci sono domini sufficienti (almeno 1)
         if not group_domains:
@@ -172,10 +190,27 @@ def main():
         print("Nessuna nuova permutazione valida trovata.", file=sys.stderr)
 
     expanded_domains = list(discovered_domains)
-    print(f"Subdomain enumeration (Bruteforce + Permutations) completata. Target espansi da {len(domains)} a {len(expanded_domains)}.", file=sys.stderr)
+    print(f"Subdomain enumeration (Bruteforce + Permutations) completata. Target parzialmente generati: {len(expanded_domains)}.", file=sys.stderr)
     
-    # Da qui in poi usiamo expanded_domains invece dei domini originali
-    domains = expanded_domains
+    # --- Step 1.8: Final DNS Validation (Double Check) ---
+    # Rimuoviamo i falsi positivi (sinkholing, poisoned resolvers) validando tutti gli
+    # expanded target esclusivamente contro i resolvers "fidati" e "trusted".
+    print(f"Avvio la post-validazione (Double Check) su {len(expanded_domains)} domini...", file=sys.stderr)
+    
+    # Estraiamo la proxy list se passata in input
+    proxy_list = None
+    if args.dns_proxy:
+        try:
+            with open(args.dns_proxy, 'r') as pf:
+                proxy_list = [p.strip() for p in pf if p.strip()]
+        except Exception as e:
+            print(f"  [!] Errore lettura proxy file: {e}", file=sys.stderr)
+            
+    valid_expanded_domains = dns_manager.double_check(expanded_domains, use_doh=args.use_doh, proxy_list=proxy_list)
+    print(f"Double Check terminato. Target considerati sicuri da scansionare: {len(valid_expanded_domains)}.", file=sys.stderr)
+    
+    # Da qui in poi usiamo i domini validati invece dei domini originali
+    domains = valid_expanded_domains
     print(f"Domains: {domains}", file=sys.stderr)
     # Calcola il raggruppamento domini centralizzato
     grouped_domains = group_domains_by_base(domains)

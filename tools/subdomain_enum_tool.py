@@ -111,7 +111,7 @@ class SubdomainEnumTool(Tool):
             else: # Default: bruteforce
                 scan_type = params.get("scan_type", "fast").lower()
                 smart_mode = params.get("smart", True)
-                max_depth = params.get("max_depth", 1)
+                max_depth = params.get("max_depth", 5)
                 wordlist_path, additional_flags = self._build_args(scan_type, params)
 
                 if not os.path.exists(wordlist_path):
@@ -126,19 +126,23 @@ class SubdomainEnumTool(Tool):
                     all_discovered = set()
                     scanned_bases = set()
                     
-                    # Coda per il bruteforce ricorsivo: lista di tuple (dominio, depth)
-                    queue = [(target, 1)]
+                    # Coda per il bruteforce ricorsivo: inseriamo solo il dominio
+                    queue = [target]
                     
                     while queue:
-                        current_target, current_depth = queue.pop(0)
+                        current_target = queue.pop(0)
                         
                         if current_target in scanned_bases:
                             continue
                             
                         scanned_bases.add(current_target)
                         
-                        if current_depth > 1:
-                            print(f"  -> Livello {current_depth}/{max_depth}: bruteforce ricorsivo su {current_target}...", file=sys.stderr)
+                        # Calcolo la profondità effettiva del target corrente rispetto al root
+                        # Esempio: target = example.com, current = api.example.com -> depth = 1 (1 label in più)
+                        current_depth = len(current_target.split('.')) - len(target.split('.'))
+                        
+                        if current_depth > 0:
+                            print(f"  -> Livello Sottodominio {current_depth}/{max_depth}: bruteforce ricorsivo su {current_target}...", file=sys.stderr)
                             
                         # Wildcard Check (Early-Exit): lo eseguiamo solo nei profili 'fast' o 'stealth'
                         # per risparmiare query inutili sui resolver sui rami catch-all.
@@ -175,16 +179,14 @@ class SubdomainEnumTool(Tool):
 
                         all_discovered.update(new_subdomains)
                         
-                        # Se non abbiamo raggiunto la profondità massima, accodiamo i nuovi sottodomini scoperti
-                        if current_depth < max_depth:
-                            for sub in new_subdomains:
-                                # Garantiamo che l'elemento sia effettivamente un sottodominio di current_target
-                                if sub.endswith(f".{current_target}") and sub != current_target:
-                                    # Puredns restituisce FQDNs completi (es. dev.api.target.com).
-                                    # L'input di puredns bruteforce è la root zone (es. api.target.com).
-                                    # In questo modo puredns inietterà la wordlist prima di (api.target.com), 
-                                    # cercando (word).api.target.com
-                                    queue.append((sub, current_depth + 1))
+                        # Accodiamo i nuovi sottodomini scoperti solo se la loro profondità assoluta non eccede max_depth
+                        for sub in new_subdomains:
+                            if sub.endswith(f".{current_target}") and sub != current_target:
+                                # Calcolo la profondità del NUOVO sottodominio rispetto alla root iniziale
+                                sub_depth = len(sub.split('.')) - len(target.split('.'))
+                                if sub_depth < max_depth:
+                                    # Se sub_depth è minore della profondità massima consentita come BASE, lo accodiamo
+                                    queue.append(sub)
                                     
                     self.results[target] = {
                         "discovered_subdomains": sorted(list(all_discovered)),
