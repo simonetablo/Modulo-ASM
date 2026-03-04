@@ -3,6 +3,7 @@ import subprocess
 import sys
 import shutil
 import random
+import os
 import dns.resolver
 import dns.exception
 import concurrent.futures
@@ -22,23 +23,18 @@ class VhostEnumTool(Tool):
 
     SCAN_PROFILES = {
         "fast": {
-            "threads": 40,
             "flags": ["-ac", "-mc", "all", "-t", "40", "-timeout", "5"]
         },
         "accurate": {
-            "threads": 80,
             "flags": ["-ac", "-mc", "all", "-t", "80", "-timeout", "10"]
         },
         "comprehensive": {
-            "threads": 100,
             "flags": ["-ac", "-mc", "all", "-t", "100", "-timeout", "15"]
         },
         "stealth": {
-            "threads": 5,
             "flags": ["-ac", "-mc", "all", "-t", "5", "-timeout", "10", "-p", "0.5-1.5"]
         },
         "noisy": {
-            "threads": 150,
             "flags": ["-ac", "-mc", "all", "-t", "150", "-timeout", "5"]
         }
     }
@@ -69,7 +65,7 @@ class VhostEnumTool(Tool):
         
         Args:
             domains (List[str]): Lista dei target web (formato 'dominio:porta').
-            params (Dict[str, Any]): Parametri della scansione (scan_type, wordlist).
+            params (Dict[str, Any]): Parametri della scansione (scan_type, eration su 4 tarwordlist).
             target_params (Dict[str, Dict]): Parametri specifici per ogni target (timing, max_rate).
             origin_results (Dict[str, Any]): Risultati da OriginIpTool con i mapping CDN/Origin IPs.
             domain_to_base (Dict[str, str]): Mappa un dominio/target al suo base_domain precalcolato.
@@ -85,6 +81,12 @@ class VhostEnumTool(Tool):
 
         # Determina la wordlist da usare
         wordlist = params.get("vhost_wordlist") or params.get("wordlist") or "wordlists/vhosts.txt"
+        
+        if not os.path.exists(wordlist):
+            print(f"ATTENZIONE: Wordlist vhost '{wordlist}' non trovata.", file=sys.stderr)
+            for target in domains:
+                self.results[target] = {"error": f"Wordlist non trovata: {wordlist}"}
+            return
 
         # Raggruppa i target in base ai loro parametri di scansione
         param_groups = self._group_by_params(domains, target_params or {})
@@ -216,9 +218,11 @@ class VhostEnumTool(Tool):
         scheme = "https" if port in ("443", "8443") else "http"
         all_discovered = []
         
-        # Generiamo i routing headers finali per questo specifico target
+        # Generiamo i routing headers usando il BASE DOMAIN (non il sottodominio).
+        # L'obiettivo del vhost fuzzing è scoprire vhost fratelli: FUZZ.example.com,
+        # non FUZZ.api.example.com.
         routing_headers = [
-            (header_name, header_format.format(domain=domain))
+            (header_name, header_format.format(domain=base_domain))
             for header_name, header_format in self.ROUTING_HEADERS_FORMATS
         ]
         

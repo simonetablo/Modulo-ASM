@@ -99,16 +99,16 @@ class NucleiTool(Tool):
         if scan_type not in self.SCAN_PROFILES:
             scan_type = 'fast'
             
-        cmd = [self.nuclei_path, "-jsonl", "-silent", "-nc", "-ni"] # -ni disabled automatic update check
+        cmd = [self.nuclei_path, "-jsonl", "-silent", "-nc", "-ni"]
         
         cmd.extend(self.SCAN_PROFILES[scan_type])
         
         # Aggiunge timeout e rate limit per polite/stealth timing per ridurre il rischio di drop WAF
-        if timing == 'polite':
-            cmd.extend(["-rl", "20", "-timeout", "10"])
-        
         if max_rate:
             cmd.extend(["-rl", str(max_rate)])
+            
+        elif timing == 'polite':
+            cmd.extend(["-rl", "20", "-timeout", "10"])
             
         return cmd
 

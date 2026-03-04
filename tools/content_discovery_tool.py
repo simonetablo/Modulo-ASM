@@ -7,6 +7,8 @@ import concurrent.futures
 from typing import List, Dict, Any
 from .base_tool import Tool
 
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
 class ContentDiscoveryTool(Tool):
     """
     Esegue Context-Aware Content Discovery (Web Fuzzing) usando FFUF.
@@ -64,10 +66,8 @@ class ContentDiscoveryTool(Tool):
             print("ATTENZIONE: Eseguibile 'ffuf' non trovato nel PATH. Content Discovery fallirà.", file=sys.stderr)
             
         # Default wordlist fornita all'utente o una fallback standard.
-        # In un setup reale, scaricare wget https://raw.githubusercontent.com/danielmiessler/SecLists/master/Discovery/Web-Content/raft-small-words.txt
         default_wordlists = [
-            "wordlists/content_discovery.txt",
-            "./wordlists/content_discovery.txt",
+            os.path.join(BASE_DIR, "wordlists", "content_discovery.txt"),
             os.path.expanduser("~/wordlists/content_discovery.txt"),
             "/usr/share/wordlists/dirb/common.txt",
             "/usr/share/seclists/Discovery/Web-Content/raft-small-words.txt"
@@ -106,6 +106,8 @@ class ContentDiscoveryTool(Tool):
 
         if httpx_results is None:
              httpx_results = {}
+        if target_params is None:
+             target_params = {}
 
         def _process_target(url: str):
             print(f"[{url}] Setup Content Discovery (Context-Aware)...", file=sys.stderr)
@@ -179,8 +181,9 @@ class ContentDiscoveryTool(Tool):
          for tech in techs:
              tech_lower = tech.lower()
              
-             for known_tech, mapped_wl in self.TECH_WORDLIST_MAP.items():
+             for known_tech, mapped_wl_rel in self.TECH_WORDLIST_MAP.items():
                   if known_tech in tech_lower:
+                       mapped_wl = os.path.join(BASE_DIR, mapped_wl_rel)
                        if os.path.exists(mapped_wl):
                            wl_set.add(mapped_wl)
                        
@@ -219,15 +222,19 @@ class ContentDiscoveryTool(Tool):
         Esegue un singolo comando Ffuf
         """
         target_url = f"{base_url}FUZZ"
-        wordlist_arg = f"{','.join(wordlists)}:FUZZ"
         
-        # -s: silent, -ac: auto-calibration (rimuove i falsi positivi 200 OK wildcard), -json: output parsabile
+        # -s: evita che il progress bar rompa il JSON su stdout
+        # -ac: auto-calibration (filtra i falsi positivi wildcard)
+        # -mc all: matcha tutti gli status code (lascia filtrare a -ac)
+        # -json: output parsabile come singolo JSON object
         cmd = [
             self.ffuf_path,
-            "-w", wordlist_arg,
             "-u", target_url,
-            "-s", "-json", "-ac"
+            "-s", "-json", "-ac", "-mc", "all"
         ]
+        
+        for wl in wordlists:
+            cmd.extend(["-w", f"{wl}:FUZZ"])
         
         if ext_flag:
             cmd.extend(["-e", ext_flag.replace("-e ", "").strip()])
@@ -239,8 +246,8 @@ class ContentDiscoveryTool(Tool):
              cmd.extend(["-rate", str(profile["rate"])])
 
         try:
-             # Esecuzione
-             process = subprocess.run(cmd, capture_output=True, text=True, check=False)
+             # Esecuzione con timeout per evitare blocchi su server lenti
+             process = subprocess.run(cmd, capture_output=True, text=True, check=False, timeout=120)
              
              # FFuf stampa righe json in caso di risultati.
              findings = []
@@ -270,14 +277,15 @@ class ContentDiscoveryTool(Tool):
                          except json.JSONDecodeError:
                              pass
              
-             if process.stderr:
-                 pass # Ffuf stderr contains rate limiting logs in -ac mode, ignore it to keep clean logs
-             
              base_url_clean = base_url.replace("FUZZ", "")
              if base_url_clean not in self.results:
                  self.results[base_url_clean] = []
              self.results[base_url_clean].extend(findings)
              print(f"[{base_url_clean}] Content Discovery run completata ({run_desc}). {len(findings)} path trovate.", file=sys.stderr)
+
+        except subprocess.TimeoutExpired:
+             base_url_clean = base_url.replace("FUZZ", "")
+             print(f"[{base_url_clean}] Timeout durante Content Discovery ({run_desc}).", file=sys.stderr)
              
         except Exception as e:
              base_url_clean = base_url.replace("FUZZ", "")

@@ -5,6 +5,7 @@ import shutil
 import os
 import string
 import random
+import tempfile
 from typing import List, Dict, Any
 from .base_tool import Tool
 
@@ -76,18 +77,18 @@ class SubdomainEnumTool(Tool):
                 self.results[target] = {"error": "Dipendenze (puredns/massdns) non trovate"}
             return
 
-        # Crea un file temporaneo per i risolutori
-        resolvers_file = "temp_resolvers.txt"
-        with open(resolvers_file, "w") as f:
+        # Crea un file temporaneo per i risolutori con un nome file universale unico
+        with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='_resolvers.txt') as f:
             f.write("\n".join(self.dns_resolvers))
+            resolvers_file = f.name
 
         try:
             if method == "resolve":
                 # In modalità resolve, 'domains' contiene i candidati da validare (es. output di alterx)
                 # Puredns resolve accetta un file con i domini da risolvere
-                candidates_file = "temp_candidates.txt"
-                with open(candidates_file, "w") as f:
+                with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='_candidates.txt') as f:
                     f.write("\n".join(domains))
+                    candidates_file = f.name
                 
                 print(f"Avvio validazione DNS per {len(domains)} candidati...", file=sys.stderr)
                 resolved = self._run_puredns_resolve(candidates_file, resolvers_file)
@@ -153,11 +154,12 @@ class SubdomainEnumTool(Tool):
                             random_prefix = ''.join(random.choices(string.ascii_lowercase + string.digits, k=12))
                             wildcard_check_domain = f"{random_prefix}.{current_target}"
                             
-                            with open("temp_wildcard_check.txt", "w") as f:
+                            with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='_wildcard.txt') as f:
                                 f.write(wildcard_check_domain)
-                            wildcard_result = self._run_puredns_resolve("temp_wildcard_check.txt", resolvers_file)
-                            if os.path.exists("temp_wildcard_check.txt"):
-                                os.remove("temp_wildcard_check.txt")
+                                wildcard_path = f.name
+                            wildcard_result = self._run_puredns_resolve(wildcard_path, resolvers_file)
+                            if os.path.exists(wildcard_path):
+                                os.remove(wildcard_path)
 
                             if wildcard_result:
                                 print(f"  [!] Rilevato Wildcard su {current_target}. Salto il bruteforce per questo ramo ({scan_type} mode).", file=sys.stderr)
@@ -232,9 +234,9 @@ class SubdomainEnumTool(Tool):
             return set()
             
         print(f"  [+] Generazione Smart: '{len(smart_candidates)}' micro-permutazioni dal target {current_target}...", file=sys.stderr)
-        candidates_file = "temp_smart_candidates.txt"
-        with open(candidates_file, "w") as f:
+        with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='_smart.txt') as f:
             f.write("\n".join(smart_candidates))
+            candidates_file = f.name
         
         smart_resolved = self._run_puredns_resolve(candidates_file, resolvers_file)
         

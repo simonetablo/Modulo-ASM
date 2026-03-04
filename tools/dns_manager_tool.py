@@ -3,7 +3,7 @@ import sys
 import time
 import random
 import string
-import requests
+import urllib.request
 import concurrent.futures
 import dns.resolver
 import dns.exception

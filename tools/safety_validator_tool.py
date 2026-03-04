@@ -10,6 +10,13 @@ class SafetyValidatorTool(Tool):
     se un target è sicuro da scansionare e con quali parametri.
     """
     
+    def __init__(self):
+        """
+        Inizializza il SafetyValidatorTool.
+        """
+        super().__init__()
+        self.results = {}
+    
     def run(self, targets: List[str], params: Dict[str, Any]) -> None:
         """
         Valida target e determina safety per scansione.

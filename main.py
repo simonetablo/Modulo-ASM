@@ -16,6 +16,16 @@ from tools.nuclei_tool import NucleiTool
 from tools.content_discovery_tool import ContentDiscoveryTool
 from tools.dns_manager_tool import DnsManagerTool
 
+def safe_load_json(data_str: str) -> dict:
+    """Helper robusto per il parsing sicuro dell'output dei tool."""
+    try:
+        if not data_str or not data_str.strip():
+            return {}
+        return json.loads(data_str)
+    except Exception as e:
+        print(f"ATTENZIONE: JSON parser error ({e}) on tool output. Fallback to {{}}.", file=sys.stderr)
+        return {}
+
 
 def group_domains_by_base(domains: List[str]) -> Dict[str, List[str]]:
     """
@@ -113,7 +123,7 @@ def main():
     subdomain_tool = SubdomainEnumTool(dns_resolvers=all_dns_resolvers)
     subdomain_tool.run(domains, params)
     subdomain_results_json = subdomain_tool.get_results()
-    subdomain_results = json.loads(subdomain_results_json)
+    subdomain_results = safe_load_json(subdomain_results_json)
     
     # Espande la lista dei domini con quelli trovati
     discovered_domains = set(domains) # Include i semi originali
@@ -121,7 +131,7 @@ def main():
         if "discovered_subdomains" in result:
             discovered_domains.update(result["discovered_subdomains"])
     
-    # --- Step 1.5: Permutation Scanning (AlterX + PureDNS Resolve) ---
+    # --- Step 1.1: Permutation Scanning (AlterX + PureDNS Resolve) ---
     # Genera variazioni dei domini scoperti e le valida.
 
     # Passiamo opzioni per limitare le permutazioni
@@ -133,6 +143,7 @@ def main():
     if params.get("scan_type") == "fast":
         perm_params_base["flags"].extend(["-limit", "5000"]) 
     
+    permutation_tool = PermutationTool()
     all_valid_permutations = set()
 
     for seed, result in subdomain_results.items():
@@ -162,7 +173,7 @@ def main():
         
         # Esegui alterx sul gruppo
         permutation_tool.run(group_domains, perm_params_base)
-        perm_results = json.loads(permutation_tool.get_results())
+        perm_results = safe_load_json(permutation_tool.get_results())
 
         # Raccogli candidati per questo gruppo
         candidates = set()
@@ -175,8 +186,9 @@ def main():
         candidates -= set(discovered_domains) # Rimuovi tutto ciò che è già noto globalmente
         
         if candidates:
-            subdomain_tool.run(list(candidates), {"method": "resolve"})
-            resolve_results = json.loads(subdomain_tool.get_results())
+            perm_resolve_tool = SubdomainEnumTool(dns_resolvers=python_dns_resolvers)
+            perm_resolve_tool.run(list(candidates), {"method": "resolve"})
+            resolve_results = safe_load_json(perm_resolve_tool.get_results())
             
             if "resolved_domains" in resolve_results:
                 valid = resolve_results["resolved_domains"]["domains"]
@@ -192,7 +204,7 @@ def main():
     expanded_domains = list(discovered_domains)
     print(f"Subdomain enumeration (Bruteforce + Permutations) completata. Target parzialmente generati: {len(expanded_domains)}.", file=sys.stderr)
     
-    # --- Step 1.8: Final DNS Validation (Double Check) ---
+    # --- Step 1.2: Final DNS Validation (Double Check) ---
     # Rimuoviamo i falsi positivi (sinkholing, poisoned resolvers) validando tutti gli
     # expanded target esclusivamente contro i resolvers "fidati" e "trusted".
     print(f"Avvio la post-validazione (Double Check) su {len(expanded_domains)} domini...", file=sys.stderr)
@@ -219,13 +231,13 @@ def main():
     hostingIntel_tool = HostingIntelTool(dns_resolvers=python_dns_resolvers)
     hostingIntel_tool.run(domains, params)
     infra_results_json = hostingIntel_tool.get_results()
-    infra_results = json.loads(infra_results_json)
+    infra_results = safe_load_json(infra_results_json)
 
     # Esegue ricerca Origin IPs
     origin_ip_tool = OriginIpTool(dns_resolvers=python_dns_resolvers)
-    origin_ip_tool.run(params, infra_results, grouped_domains=grouped_domains)
+    origin_ip_tool.run(domains, params, infra_results, grouped_domains=grouped_domains)
     origin_results_json = origin_ip_tool.get_results()
-    origin_results = json.loads(origin_results_json)
+    origin_results = safe_load_json(origin_results_json)
 
     # Estrae mapping dominio -> IP da HostingIntelTool tramite get invece che pop
     domain_ip_map = infra_results.get('_ip_map', {})
@@ -242,7 +254,7 @@ def main():
     }
     safety_validator.run(valid_domains_for_safety, safety_params)
     safety_results_json = safety_validator.get_results()
-    safety_results = json.loads(safety_results_json)
+    safety_results = safe_load_json(safety_results_json)
     
     # Filtra target sicuri e skippa quelli non sicuri
     safe_targets = []
@@ -332,7 +344,7 @@ def main():
     
     # Recupero dei risultati di Nmap
     nmap_results_json = nmap_tool.get_results()
-    nmap_results = json.loads(nmap_results_json)
+    nmap_results = safe_load_json(nmap_results_json)
     
     # Analisi dei risultati per identificare target web (porte 80/443 aperte)
     web_targets = set()
@@ -351,7 +363,7 @@ def main():
                 # Considera solo porte aperte o filtrate (che potrebbero essere aperte)
                 if state in ["open", "filtered", "open|filtered"]:
                     # Logica per determinare se è un servizio web (http, https, ssl o porte standard)
-                    is_web_service = "http" in name or "https" in name or "ssl" in name or port == "80" or port == "443" or port == "8080" or port == "8443"
+                    is_web_service = "http" in name or "https" in name or "ssl" in name or port in [80, 443, 8080, 8443]
                             
                     if is_web_service:
                         # Dobbiamo risalire ai domini originali che puntavano a questo IP
@@ -432,7 +444,7 @@ def main():
         httpx_tool = HttpxTool()
         httpx_tool.run(list(web_targets), params, target_params=target_params)
         httpx_results_json = httpx_tool.get_results()
-        httpx_results = json.loads(httpx_results_json)
+        httpx_results = safe_load_json(httpx_results_json)
 
         
         # Integra i risultati di httpx nella struttura del dominio corrispondente
@@ -460,7 +472,7 @@ def main():
             c_discovery_tool = ContentDiscoveryTool()
             c_discovery_tool.run(alive_web_targets, params, httpx_results=httpx_results, target_params=target_params)
             c_discovery_json = c_discovery_tool.get_results()
-            c_discovery_results = json.loads(c_discovery_json)
+            c_discovery_results = safe_load_json(c_discovery_json)
             
             # Integra i file e le directory trovate nel JSON
             for url, findings in c_discovery_results.items():
@@ -484,7 +496,7 @@ def main():
             # Nuclei elabora la lista url validati da Httpx 
             nuclei_tool.run(alive_web_targets, params, target_params=target_params)
             nuclei_results_json = nuclei_tool.get_results()
-            nuclei_results = json.loads(nuclei_results_json)
+            nuclei_results = safe_load_json(nuclei_results_json)
             
             # Integra i findings di Nuclei all'interno della struttura json
             for url, findings in nuclei_results.items():
@@ -519,7 +531,7 @@ def main():
         print(f"\nAvvio VHost Enumeration su {len(web_targets)} target web...", file=sys.stderr)
         vhost_tool = VhostEnumTool(dns_resolvers=python_dns_resolvers)
         vhost_tool.run(list(web_targets), params, target_params=target_params, origin_results=origin_results, domain_to_base=domain_to_base, domain_ip_map=domain_ip_map)
-        vhost_results = json.loads(vhost_tool.get_results())
+        vhost_results = safe_load_json(vhost_tool.get_results())
         
         # Integra risultati nella struttura finale
         for url, vhost_data in vhost_results.items():
@@ -533,7 +545,7 @@ def main():
     # Tutti gli scan sono completati, ferma il monitoraggio IP rotation
     iprotation_monitor.stop()  # Questo ora attende la durata minima E il completamento del thread
     rotation_results_json = iprotation_monitor.get_results()
-    rotation_results = json.loads(rotation_results_json)
+    rotation_results = safe_load_json(rotation_results_json)
     
     # Integra i risultati di IP rotation nella struttura finale
     for domain, rotation_data in rotation_results.items():

@@ -6,7 +6,7 @@ import sys
 import random
 import dns.resolver
 from typing import List, Dict, Any
-from datetime import datetime
+from datetime import datetime, timezone
 from .base_tool import Tool
 
 
@@ -128,7 +128,7 @@ class IPRotationTool(Tool):
             
             answers = resolver.resolve(domain, 'A')
             ip = str(answers[0])  # Prende il primo IP
-            timestamp = datetime.utcnow().isoformat() + 'Z'
+            timestamp = datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')
             
             with self.lock:
                 if domain not in self.ip_history:

@@ -2,7 +2,6 @@ import nmap
 import json
 import sys
 from typing import List, Dict, Any
-from typing import List, Dict, Any
 from .base_tool import Tool
 
 class NmapTool(Tool):
@@ -14,7 +13,7 @@ class NmapTool(Tool):
     SCAN_PROFILES = {
         "fast": "-F",
         "accurate": "--top-ports 1000 -sV --version-intensity 9 -sC",
-        "comprehensive": "-sS -p- -sV -sC -sU -p U:53,161,162,111,123,137,138,500,514,1434,T:1-65535",
+        "comprehensive": "-sS -sV -sC -sU -p U:53,161,162,111,123,137,138,500,514,1434,T:1-65535",
         "stealth": "-sS",
         "noisy": "-p- -T5 --script default,discovery,safe"
     }
@@ -30,12 +29,12 @@ class NmapTool(Tool):
         try:
             self.nm = nmap.PortScanner()
         except nmap.PortScannerError:
-            print("ERRORE: Nmap non trovato nel PATH.", file=sys.stderr)
+            print("ATTENZIONE: Nmap non trovato nel PATH. Il tool fallirà se eseguito.", file=sys.stderr)
             print("Assicurati che nmap sia installato e aggiunto al PATH di sistema.", file=sys.stderr)
-            sys.exit(1)
+            self.nm = None
         except Exception as e:
             print(f"Errore inatteso nell'inizializzazione di nmap: {e}", file=sys.stderr)
-            sys.exit(1)
+            self.nm = None
 
     def run(self, domains: List[str], params: Dict[str, Any], target_params: Dict[str, Dict] = None) -> None:
         """
@@ -48,6 +47,11 @@ class NmapTool(Tool):
                                      che può essere 'fast', 'accurate' o 'stealth'.
             target_params (Dict[str, Dict]): Parametri specifici per ogni target (timing, max_rate).
         """
+        if not self.nm:
+            for domain in domains:
+                self.results[domain] = {"error": "Nmap non trovato nel PATH"}
+            return
+
         # Raggruppa i domini in base ai loro parametri di scansione
         param_groups = self._group_by_params(domains, target_params or {})
         

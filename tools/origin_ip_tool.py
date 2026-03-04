@@ -20,7 +20,7 @@ class OriginIpTool(Tool):
         self.results = {}
         self.dns_resolvers = dns_resolvers or ['1.1.1.1', '8.8.8.8']
 
-    def run(self, params: Dict[str, Any], infra_results: Dict[str, Any] = None, grouped_domains: Dict[str, List[str]] = None) -> None:
+    def run(self, domains: List[str], params: Dict[str, Any], infra_results: Dict[str, Any] = None, grouped_domains: Dict[str, List[str]] = None) -> None:
         """
         Analizza i domini e l'infrastruttura per trovare gli Origin IPs.
         

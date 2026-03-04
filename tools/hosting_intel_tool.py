@@ -44,6 +44,7 @@ class HostingIntelTool(Tool):
 
         ips_to_analyze = set()
         domain_ip_map = {} # Mappa dominio -> IP
+        domain_dns_info = {} # Mappa dominio -> {"ttl": ..., "pool_size": ...}
         
         scan_type = params.get("scan_type", "fast").lower()
 
@@ -60,6 +61,7 @@ class HostingIntelTool(Tool):
             
         print(f"Avvio analisi infrastruttura su {len(domains)} target (fallback={fallback_count}, timeout={timeout_sec}s)...", file=sys.stderr)
 
+        # Helper interno per multi-threading delle query DNS
         def resolve_domain(target):
             try:
                 resolver = dns.resolver.Resolver(configure=False)
@@ -70,22 +72,25 @@ class HostingIntelTool(Tool):
                 
                 answers = resolver.resolve(target, 'A')
                 ip = str(answers[0]) # Prende il primo record A
-                return target, ip, None
+                ttl = answers.rrset.ttl
+                pool_size = len(answers)
+                return target, ip, ttl, pool_size, None
             except (dns.resolver.NXDOMAIN, dns.resolver.NoAnswer, dns.resolver.Timeout, dns.exception.DNSException):
-                return target, None, "DNS Resolution Failed"
+                return target, None, None, None, "DNS Resolution Failed"
             except Exception:
-                return target, None, "DNS Resolution Failed"
+                return target, None, None, None, "DNS Resolution Failed"
 
         max_workers = min(50, len(domains) if domains else 1)
         with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
             future_to_domain = {executor.submit(resolve_domain, target): target for target in domains}
             for future in concurrent.futures.as_completed(future_to_domain):
-                target, ip, error = future.result()
+                target, ip, ttl, pool_size, error = future.result()
                 if error:
                     self.results[target] = {"error": error}
                 else:
                     ips_to_analyze.add(ip)
                     domain_ip_map[target] = ip
+                    domain_dns_info[target] = {"ttl": ttl, "pool_size": pool_size}
         
         if not ips_to_analyze:
             return
@@ -108,9 +113,10 @@ class HostingIntelTool(Tool):
                 "has_infrastructure": False,
                 "type_details": {}
             })
-            
-            # Check per IP dinamici/rotanti
-            rotation_info = self._check_ip_rotation(target)
+            # Recupera dati DNS salvati
+            dns_data = domain_dns_info.get(target, {})
+            # Check per IP dinamici/rotanti usando i dati DNS già risolti
+            rotation_info = self._check_ip_rotation(target, dns_data.get("ttl"), dns_data.get("pool_size"))
             info.update(rotation_info)
             return target, info
 
@@ -184,47 +190,25 @@ class HostingIntelTool(Tool):
             
         return results
     
-    def _check_ip_rotation(self, domain: str) -> Dict[str, Any]:
+    def _check_ip_rotation(self, domain: str, ttl: int = None, pool_size: int = None) -> Dict[str, Any]:
         """
-        Verifica euristicamente se il dominio usa IP dinamici/rotanti.
-        Usa TTL e numero di A record come indicatori.
+        Analisi avanzata della rotazione IP.
+        Usa TTL e numero di A record come indicatori, recuperati dalla query DNS principale.
         """
         
         result = {
             "is_dynamic": False,
-            "ttl": None,
-            "ip_pool_size": 1
+            "ttl": ttl,
+            "ip_pool_size": pool_size or 1
         }
         
-        try:
-            # Per IP rotation detection passiamo sempre parametri conservativi (fast)
-            # per non rallentare l'euristica generale post-risoluzione.
-            fallback_count = min(2, len(self.dns_resolvers))
-            timeout_sec = 2.0
-            
-            resolver = dns.resolver.Resolver(configure=False)
-            resolver.nameservers = random.sample(self.dns_resolvers, fallback_count) if self.dns_resolvers else ['8.8.8.8']
-            resolver.timeout = timeout_sec
-            resolver.lifetime = timeout_sec * fallback_count
-
-            
-            answers = resolver.resolve(domain, 'A')
-
-            # Estrai TTL e numero di IP nel pool
-            result["ttl"] = answers.rrset.ttl
-            result["ip_pool_size"] = len(answers)
-            
+        if ttl is not None and pool_size is not None:
             # Euristica per IP dinamici:
             # - TTL < 300s = rotazione frequente (CDN/load balancer)
             # - Pool size > 1 = multiple IP available
-            if result["ttl"] < 300 or result["ip_pool_size"] > 1:
+            if ttl < 300 or pool_size > 1:
                 result["is_dynamic"] = True
                 
-        except Exception as e:
-            # Se DNS query fallisce, assume statico
-            # print(f"DEBUG DNS Error for {domain}: {e}", file=sys.stderr)
-            pass
-        
         return result
 
     def get_results(self) -> str:
