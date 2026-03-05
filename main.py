@@ -13,6 +13,8 @@ from tools.subdomain_enum_tool import SubdomainEnumTool
 from tools.vhost_enum_tool import VhostEnumTool
 from tools.origin_ip_tool import OriginIpTool
 from tools.nuclei_tool import NucleiTool
+from tools.spider_tool import SpiderTool
+from tools.js_analyzer_tool import JsAnalyzerTool
 from tools.content_discovery_tool import ContentDiscoveryTool
 from tools.dns_manager_tool import DnsManagerTool
 
@@ -393,6 +395,8 @@ def main():
             "subdomain_enum": {},
             "ports": [],
             "web_recon": {},
+            "spidering": {},
+            "js_analysis": {},
             "advanced_fingerprint": [],
             "content_discovery": [],
             "vhost_enum": {}
@@ -467,10 +471,83 @@ def main():
             if domain_key in final_results:
                 final_results[domain_key]["web_recon"][url] = data
 
+        # === Integrazione Web Spidering (Katana) ===
+        dynamic_wordlists = {} # {base_domain: [paths...]}
+        
+        if alive_web_targets:
+            spider_tool = SpiderTool()
+            spider_tool.run(alive_web_targets, params, target_params=target_params)
+            spider_results = safe_load_json(spider_tool.get_results())
+            
+            # Raccogliamo i JS file tracciando il dominio originario che li ha scoperti
+            all_js_files_with_context = []
+            
+            for url, findings in spider_results.items():
+                domain_key = findings.get("base_domain")
+                if not domain_key:
+                    # Fallback fallback
+                    parsed_url = urlparse("//" + url if "://" not in url else url)
+                    domain_key = parsed_url.hostname
+                
+                if domain_key in final_results:
+                     final_results[domain_key]["spidering"][url] = findings
+                     
+                if "error" not in findings:
+                     # Aggiungiamo i path alla wordlist dinamica globale per dominio
+                     if domain_key not in dynamic_wordlists:
+                          dynamic_wordlists[domain_key] = set()
+                          
+                     if findings.get("paths_wordlist"):
+                          dynamic_wordlists[domain_key].update(findings["paths_wordlist"])
+                          
+                     if findings.get("js_files"):
+                          for js in findings["js_files"]:
+                               all_js_files_with_context.append({"url": js, "origin_domain": domain_key})
+
+        # === Integrazione Static JS Analysis (Jsluice) ===
+        if all_js_files_with_context:
+            # Estrai solo gli URL unici per jsluice
+            unique_js_urls = list(set([x["url"] for x in all_js_files_with_context]))
+            
+            js_analyzer = JsAnalyzerTool()
+            js_analyzer.run(unique_js_urls, params)
+            js_results = safe_load_json(js_analyzer.get_results())
+            
+            # Il problema: Jsluice raggruppa per il dominio su cui risiede il file JS (es. cdn.company.com).
+            # Noi dobbiamo mappare i path trovati nel JS al dominio ORIGINARIO che stavamo scansionando.
+            
+            for context in all_js_files_with_context:
+                js_url = context["url"]
+                origin_domain = context["origin_domain"]
+                
+                # Cerca i risultati di jsluice per questo specifico JS URL's base domain
+                js_hosted_domain = urlparse(js_url).hostname
+                if js_hosted_domain and js_hosted_domain in js_results:
+                     extracted_paths = js_results[js_hosted_domain]
+                     
+                     if origin_domain in final_results:
+                          # Manteniamo un set unico di path JS originati per questo target
+                          if "endpoints" not in final_results[origin_domain]["js_analysis"]:
+                               final_results[origin_domain]["js_analysis"]["endpoints"] = []
+                               
+                          # Usiamo set temp per non duplicare nel JSON finale
+                          temp_set = set(final_results[origin_domain]["js_analysis"]["endpoints"])
+                          temp_set.update(extracted_paths)
+                          final_results[origin_domain]["js_analysis"]["endpoints"] = list(temp_set)
+                          final_results[origin_domain]["js_analysis"]["total_extracted_endpoints"] = len(temp_set)
+                          
+                          if origin_domain not in dynamic_wordlists:
+                               dynamic_wordlists[origin_domain] = set()
+                          dynamic_wordlists[origin_domain].update(extracted_paths)
+
+        # Convert sets back to lists for FFUF serialization
+        for k in dynamic_wordlists:
+             dynamic_wordlists[k] = list(dynamic_wordlists[k])
+
         # === Integrazione Content Discovery (Web Fuzzing Context-Aware) ===
         if alive_web_targets:
             c_discovery_tool = ContentDiscoveryTool()
-            c_discovery_tool.run(alive_web_targets, params, httpx_results=httpx_results, target_params=target_params)
+            c_discovery_tool.run(alive_web_targets, params, httpx_results=httpx_results, target_params=target_params, dynamic_wordlists=dynamic_wordlists)
             c_discovery_json = c_discovery_tool.get_results()
             c_discovery_results = safe_load_json(c_discovery_json)
             

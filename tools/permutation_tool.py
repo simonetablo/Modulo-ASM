@@ -70,15 +70,24 @@ class PermutationTool(Tool):
             payload_file.close()
             
             # Crea e valorizza la wordlist "Common/Generica"
-            common_words = [
-                "api", "vpn", "dev", "test", "stage", "prod", "beta", "uat",
-                "admin", "app", "login", "auth", "portal", "db", "mail",
-                "gw", "k8s", "metrics", "grafana", "sso"
-            ]
-            common_file = tempfile.NamedTemporaryFile(mode='w+', delete=False, suffix='_common.txt')
-            common_file.write('\n'.join(common_words))
-            common_payload_path = common_file.name
-            common_file.close()
+            # Se params["common_wordlist"] punta a un file valido, lo usa direttamente.
+            # Altrimenti, scrive su file temporaneo la lista hardcoded di fallback.
+            custom_common_path = params.get("common_wordlist")
+            if custom_common_path and os.path.exists(custom_common_path):
+                common_payload_path = custom_common_path
+                print(f"  [*] Uso wordlist 'common' personalizzata: {custom_common_path}", file=sys.stderr)
+            else:
+                if custom_common_path:
+                    print(f"  [!] Wordlist 'common' specificata non trovata ({custom_common_path}). Uso lista di fallback.", file=sys.stderr)
+                common_words = [
+                    "api", "vpn", "dev", "test", "stage", "prod", "beta", "uat",
+                    "admin", "app", "login", "auth", "portal", "db", "mail",
+                    "gw", "k8s", "metrics", "grafana", "sso"
+                ]
+                common_file = tempfile.NamedTemporaryFile(mode='w+', delete=False, suffix='_common.txt')
+                common_file.write('\n'.join(common_words))
+                common_payload_path = common_file.name
+                common_file.close()
 
         try:
             cmd = [
@@ -138,7 +147,8 @@ class PermutationTool(Tool):
                 os.remove(patterns_file_path)
             if payload_file_path and os.path.exists(payload_file_path):
                 os.remove(payload_file_path)
-            if common_payload_path and os.path.exists(common_payload_path):
+            custom_common_path = params.get("common_wordlist")
+            if common_payload_path and common_payload_path != custom_common_path and os.path.exists(common_payload_path):
                 os.remove(common_payload_path)
 
     def _extract_patterns(self, domains: List[str], scan_type: str = "fast", min_occurrences: int = 3, max_wildcards: int = 5) -> List[str]:

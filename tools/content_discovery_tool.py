@@ -3,6 +3,7 @@ import json
 import shutil
 import subprocess
 import sys
+import threading
 import concurrent.futures
 from typing import List, Dict, Any
 from .base_tool import Tool
@@ -46,11 +47,11 @@ class ContentDiscoveryTool(Tool):
 
     # Profili FFUF - Bilanciano aggressività, velocità e rate limiting
     SCAN_PROFILES = {
-        "fast": {"threads": 50, "rate": 0, "timeout": 5},
-        "accurate": {"threads": 30, "rate": 50, "timeout": 8},
-        "comprehensive": {"threads": 40, "rate": 0, "timeout": 10},
-        "stealth": {"threads": 5, "rate": 10, "timeout": 15},
-        "noisy": {"threads": 100, "rate": 0, "timeout": 5}
+        "fast": {"threads": 50, "rate": 0, "timeout": 5, "recursion_depth": 0},
+        "accurate": {"threads": 30, "rate": 50, "timeout": 8, "recursion_depth": 1},
+        "comprehensive": {"threads": 40, "rate": 0, "timeout": 10, "recursion_depth": 2},
+        "stealth": {"threads": 5, "rate": 10, "timeout": 15, "recursion_depth": 0},
+        "noisy": {"threads": 100, "rate": 0, "timeout": 5, "recursion_depth": 2}
     }
 
     def __init__(self, wordlist_path: str = None):
@@ -60,6 +61,7 @@ class ContentDiscoveryTool(Tool):
         """
         super().__init__()
         self.results = {}
+        self.lock = threading.Lock()
         
         self.ffuf_path = shutil.which("ffuf")
         if not self.ffuf_path:
@@ -84,7 +86,7 @@ class ContentDiscoveryTool(Tool):
              print("ATTENZIONE: Nessuna wordlist trovata nei path di default. Fornisci un file valido per il Web Fuzzing.", file=sys.stderr)
 
 
-    def run(self, targets: List[str], params: Dict[str, Any], httpx_results: Dict[str, Any] = None, target_params: Dict[str, Dict] = None) -> None:
+    def run(self, targets: List[str], params: Dict[str, Any], httpx_results: Dict[str, Any] = None, target_params: Dict[str, Dict] = None, dynamic_wordlists: Dict[str, List[str]] = None) -> None:
         """
         Esegue il Web Fuzzing Context-Aware sugli URL forniti.
         
@@ -93,6 +95,7 @@ class ContentDiscoveryTool(Tool):
             params: Parametri globali
             httpx_results: Il sub-documento JSON contenente i tech tags (necessario per l'estrazione context-aware).
             target_params: Override dei profili per singoli root domains
+            dynamic_wordlists: Dizionario {base_domain: [paths...]} contenente i path trovati da Katana/Jsluice 
         """
         if not self.ffuf_path:
             for t in targets:
@@ -108,6 +111,8 @@ class ContentDiscoveryTool(Tool):
              httpx_results = {}
         if target_params is None:
              target_params = {}
+        if dynamic_wordlists is None:
+             dynamic_wordlists = {}
 
         def _process_target(url: str):
             print(f"[{url}] Setup Content Discovery (Context-Aware)...", file=sys.stderr)
@@ -124,26 +129,61 @@ class ContentDiscoveryTool(Tool):
             
             # 2. Analisi Contestuale Httpx (Ricerca Tecnologie e Wordlist)
             extensions = self._calculate_extensions(url, httpx_results)
-            tech_wordlists = self._calculate_tech_wordlists(url, httpx_results)
+            tech_wordlists = self._calculate_tech_wordlists(url, httpx_results, scan_type)
             
             # Se è stealth non aggiungiamo troppe estensioni per limitare le metriche di query
             if scan_type == "stealth" and len(extensions) > 1:
                 extensions = extensions[:1]
                 tech_wordlists = [] # Evita wordlist extra in stealth mode
                 
-            # Costruzione riga estensioni: " -e .php,.txt "
+            # Costruzione riga estensioni: " .php,.txt "
             ext_flag = ""
             if extensions:
-                ext_flag = f"-e {','.join(extensions)}"
-                print(f"[{url}] Tech rilevate. Aggiunte estensioni contestuali: {','.join(extensions)}", file=sys.stderr)
+                ext_flag = f"{','.join(extensions)}"
+                print(f"[{url}] Tech rilevate. Aggiunte estensioni contestuali: {ext_flag}", file=sys.stderr)
             else:
                 print(f"[{url}] Nessuna tech specifica rilevata per estensioni.", file=sys.stderr)
                 
             if tech_wordlists:
                 print(f"[{url}] Trovate wordlist specifiche per la tech: {', '.join(tech_wordlists)}", file=sys.stderr)
 
+            # Leggi eventuale parametro custom per la profondità di ricorsione (fallback dal profilo scelto)
+            default_depth = profile.get("recursion_depth", 1)
+            recursion_depth = target_params.get(base_domain, {}).get("recursion_depth", params.get("recursion_depth", default_depth))
+
+            # Controllo CDN per abbassare il rate limiting dinamicamente se non stealth o fast
+            target_data = httpx_results.get(url, {})
+            is_cdn = target_data.get("is_cdn", False) or target_data.get("cdn", False)
+            
+            # Se è dietro CDN e stiamo scansionando aggressivo, abbassiamo un po' i thread per non essere bloccati
+            if is_cdn and scan_type in ["accurate", "comprehensive", "noisy"]:
+                 print(f"[{url}] CDN rilevata, autolimitazione dei thread temporanea per evitare ban WAF.", file=sys.stderr)
+                 profile = profile.copy() # evitiamo di modificare il dict originale globale
+                 profile["threads"] = min(profile["threads"], 20)
+                 if profile["rate"] == 0:
+                      profile["rate"] = 30 # Forziamo un rate di request
+
+            # Recupera l'eventuale wordlist dinamica (es. Spidering/JS) per questo dominio
+            dyn_wl_file = None
+            if base_domain in dynamic_wordlists and dynamic_wordlists[base_domain]:
+                 paths = dynamic_wordlists[base_domain]
+                 print(f"[{url}] Ricevuti {len(paths)} endpoint dinamici dallo spidering. Li converto in wordlist locale.", file=sys.stderr)
+                 # Salva temporaneamente il set in \tmp
+                 dyn_wl_file = f"/tmp/asm_dyn_wl_{base_domain}.txt"
+                 with open(dyn_wl_file, "w") as f:
+                      for p in paths:
+                           # Ffuf prepend the slash normally so we ensure paths don't start with / internally here to avoid double slash
+                           clean_p = p.lstrip('/')
+                           if clean_p:
+                               f.write(f"{clean_p}\n")
+
             # 3. Costruzione e Lancio Comando FFUF
-            self._execute_ffuf(url, ext_flag, profile, scan_type, tech_wordlists)
+            self._execute_ffuf(url, ext_flag, profile, scan_type, recursion_depth, tech_wordlists, dyn_wl_file)
+            
+            if dyn_wl_file and os.path.exists(dyn_wl_file):
+                 try:
+                     os.remove(dyn_wl_file)
+                 except: pass
 
         max_workers = min(3, len(targets) if targets else 1)
         with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
@@ -169,7 +209,7 @@ class ContentDiscoveryTool(Tool):
                        
          return list(ext_set)
 
-    def _calculate_tech_wordlists(self, url: str, httpx_results: Dict[str, Any]) -> List[str]:
+    def _calculate_tech_wordlists(self, url: str, httpx_results: Dict[str, Any], scan_type: str) -> List[str]:
          """
          Mappa i tag "tech" dell'URL specificato allestendo un set deduplicato di wordlist specifiche.
          """
@@ -178,6 +218,20 @@ class ContentDiscoveryTool(Tool):
          
          techs = target_data.get("tech", [])
          
+         # 2. Smart Related Wordlists (Miglioria: Aggiunta logica per tecnologie "figlie" in scansioni profonde)
+         # Se troviamo PHP o un Web Server generico e scansioniamo in modo 'accurate' o 'comprehensive',
+         # aumentiamo la coverage inserendo wordlist di CMS comuni anche se Httpx non li ha confermati
+         deep_scan = scan_type in ["accurate", "comprehensive"]
+         extra_techs_to_check = set()
+         
+         if deep_scan:
+             for tech in techs:
+                 tech_lower = tech.lower()
+                 if "php" in tech_lower:
+                     extra_techs_to_check.update(["wordpress"]) # Aggiunge WP bypassando la detection esplicita di httpx
+                 elif "java" in tech_lower:
+                     extra_techs_to_check.update(["tomcat", "spring"])
+                 
          for tech in techs:
              tech_lower = tech.lower()
              
@@ -186,10 +240,19 @@ class ContentDiscoveryTool(Tool):
                        mapped_wl = os.path.join(BASE_DIR, mapped_wl_rel)
                        if os.path.exists(mapped_wl):
                            wl_set.add(mapped_wl)
+                           
+         if deep_scan:
+             for extra_tech in extra_techs_to_check:
+                 for known_tech, mapped_wl_rel in self.TECH_WORDLIST_MAP.items():
+                      if known_tech in extra_tech:
+                           mapped_wl = os.path.join(BASE_DIR, mapped_wl_rel)
+                           if os.path.exists(mapped_wl):
+                               wl_set.add(mapped_wl)
+                               print(f"[{url}] Deep scan: Aggiunta wordlist euristica per probabile {known_tech} derivato.", file=sys.stderr)
                        
          return list(wl_set)
          
-    def _execute_ffuf(self, url: str, ext_flag: str, profile: Dict[str, Any], scan_type: str, tech_wordlists: List[str] = None) -> None:
+    def _execute_ffuf(self, url: str, ext_flag: str, profile: Dict[str, Any], scan_type: str, recursion_depth: int, tech_wordlists: List[str] = None, dynamic_wordlist: str = None) -> None:
         """
         Innesca il processo ffuf, parsando l'stdout line-by-line (formato JSON)
         ed accumulando i risultati validati nella directory.
@@ -200,24 +263,30 @@ class ContentDiscoveryTool(Tool):
         # Gestione avanzata multi-wordlist per evitare estensioni doppie.
         # W1 = Wordlist Generica (subisce le estensioni di -e, es: admin -> admin.php)
         # W2 = Wordlist Specifica (già provvista di estensioni, es: wp-login.php)
+        # W3 = Wordlist Dinamica da Katana/Jsluice 
+        
+        if dynamic_wordlist:
+             # RUN SPECIALE: Fuzzing attivo chirurgico sui path trovati dallo spidering
+             # Lo spidering trova il path "pulito", Ffuf proverà ad appendere le estensioni scoperte (es: /api/users -> /api/users.bak)
+             self._do_ffuf_run(url, target_url, [dynamic_wordlist], ext_flag, profile, scan_type, recursion_depth, "Spidering Context")
         
         if tech_wordlists:
             # RUN 1: Wordlist Base
             # Nei profili "fast" o "stealth", se abbiamo wordlists tecnologiche specifiche (W2),
             # saltiamo del tutto la ricerca generalista (W1) per risparmiare moltissimo tempo ed essere furtivi.
             if scan_type not in ["fast", "stealth"]:
-                self._do_ffuf_run(target_url, [self.wordlist], ext_flag, profile, "Base + Estensioni")
+                self._do_ffuf_run(url, target_url, [self.wordlist], ext_flag, profile, scan_type, recursion_depth, "Base + Estensioni")
             else:
                 print(f"[{url}] Profilo '{scan_type}': Salto directory fuzzing generico, uso solo tech-words.", file=sys.stderr)
             
             # RUN 2: Wordlist Specifiche
-            self._do_ffuf_run(target_url, tech_wordlists, "", profile, "Dizionari Tech")
+            self._do_ffuf_run(url, target_url, tech_wordlists, "", profile, scan_type, recursion_depth, "Dizionari Tech")
             
         else:
             # Singola run normale se non ci sono tecnologie specifiche trovate
-            self._do_ffuf_run(target_url, [self.wordlist], ext_flag, profile, "Singola")
+            self._do_ffuf_run(url, target_url, [self.wordlist], ext_flag, profile, scan_type, recursion_depth, "Singola")
 
-    def _do_ffuf_run(self, base_url: str, wordlists: List[str], ext_flag: str, profile: Dict[str, Any], run_desc: str) -> None:
+    def _do_ffuf_run(self, original_url: str, base_url: str, wordlists: List[str], ext_flag: str, profile: Dict[str, Any], scan_type: str, recursion_depth: int, run_desc: str) -> None:
         """
         Esegue un singolo comando Ffuf
         """
@@ -225,29 +294,39 @@ class ContentDiscoveryTool(Tool):
         
         # -s: evita che il progress bar rompa il JSON su stdout
         # -ac: auto-calibration (filtra i falsi positivi wildcard)
-        # -mc all: matcha tutti gli status code (lascia filtrare a -ac)
+        # -mc: espliciti status code validi invece di "all" per evitare inquinamento da WAF 403 bulk
         # -json: output parsabile come singolo JSON object
         cmd = [
             self.ffuf_path,
             "-u", target_url,
-            "-s", "-json", "-ac", "-mc", "all"
+            "-s", "-json", "-ac", "-mc", "200,204,301,302,307,401,403,405"
         ]
         
         for wl in wordlists:
             cmd.extend(["-w", f"{wl}:FUZZ"])
         
         if ext_flag:
-            cmd.extend(["-e", ext_flag.replace("-e ", "").strip()])
+            cmd.extend(["-e", ext_flag])
             
         cmd.extend(["-t", str(profile["threads"])])
-        cmd.extend(["-timeout", str(profile["timeout"])])
         
-        if profile["rate"] > 0:
+        # Aggiunta di -maxtime nativo di Ffuf per non bruciare risorse su host impiccati
+        timeout_val = profile["timeout"] * 60 # Convertito da minuti (se era così inteso, o secondi lunghi)
+        # Assumendo profile["timeout"] fosse un valore generico numerico (5 = 5 minuti in questo tool)
+        cmd.extend(["-maxtime", str(timeout_val)])
+        
+        if profile.get("rate", 0) > 0:
              cmd.extend(["-rate", str(profile["rate"])])
 
+        # Aggiunta di Recursive Fuzzing se abilitato e solo su dizionari non mirati
+        if "Base" in run_desc and recursion_depth > 0:
+             cmd.extend(["-recursion", "-recursion-depth", str(recursion_depth)])
+             if profile.get("rate", 0) == 0:
+                 cmd.extend(["-rate", "100"]) # Non sfondare il server in recursione
+
         try:
-             # Esecuzione con timeout per evitare blocchi su server lenti
-             process = subprocess.run(cmd, capture_output=True, text=True, check=False, timeout=120)
+             # Esecuzione subprocess leggermente più lasca del maxtime di ffuf
+             process = subprocess.run(cmd, capture_output=True, text=True, check=False, timeout=timeout_val + 30)
              
              # FFuf stampa righe json in caso di risultati.
              findings = []
@@ -277,21 +356,35 @@ class ContentDiscoveryTool(Tool):
                          except json.JSONDecodeError:
                              pass
              
-             base_url_clean = base_url.replace("FUZZ", "")
-             if base_url_clean not in self.results:
-                 self.results[base_url_clean] = []
-             self.results[base_url_clean].extend(findings)
-             print(f"[{base_url_clean}] Content Discovery run completata ({run_desc}). {len(findings)} path trovate.", file=sys.stderr)
+             # Logica di deduplicazione: evitare doppi accodamenti dello stesso endpoint
+             with self.lock:
+                 if original_url not in self.results:
+                     self.results[original_url] = []
+                     
+                 # Estrae tutti gli endpoint già presenti per questo url
+                 existing_endpoints = {f["endpoint"] for f in self.results[original_url] if getattr(f, "get", lambda x: None)("endpoint")}
+                 
+                 unique_findings = []
+                 for f in findings:
+                     if f.get("endpoint") and f["endpoint"] not in existing_endpoints:
+                         unique_findings.append(f)
+                         existing_endpoints.add(f["endpoint"])
+                         
+                 self.results[original_url].extend(unique_findings)
+             print(f"[{original_url}] Content Discovery run completata ({run_desc}). {len(unique_findings)} path uniche aggiunte (su {len(findings)} rilevate).", file=sys.stderr)
 
         except subprocess.TimeoutExpired:
-             base_url_clean = base_url.replace("FUZZ", "")
-             print(f"[{base_url_clean}] Timeout durante Content Discovery ({run_desc}).", file=sys.stderr)
+             print(f"[{original_url}] Timeout durante Content Discovery ({run_desc}).", file=sys.stderr)
+             with self.lock:
+                  if original_url not in self.results:
+                       self.results[original_url] = []
+                  self.results[original_url].append({"error": f"Run Timeout ({run_desc})"})
              
         except Exception as e:
-             base_url_clean = base_url.replace("FUZZ", "")
-             if base_url_clean not in self.results:
-                  self.results[base_url_clean] = []
-             self.results[base_url_clean] = {"error": f"Ffuf crash: {str(e)}"}
+             with self.lock:
+                  if original_url not in self.results:
+                       self.results[original_url] = []
+                  self.results[original_url].append({"error": f"Ffuf crash [{run_desc}]: {str(e)}"})
 
 
     def get_results(self) -> str:

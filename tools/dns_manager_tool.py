@@ -3,7 +3,7 @@ import sys
 import time
 import random
 import string
-import urllib.request
+import requests
 import concurrent.futures
 import dns.resolver
 import dns.exception
@@ -89,9 +89,9 @@ class DnsManagerTool(Tool):
     def _download_list(self, url: str, dest_file: str, do_sanity_check: bool = False) -> None:
         print(f"  [*] Download da {url}...", file=sys.stderr)
         try:
-            req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-            with urllib.request.urlopen(req, timeout=10) as response:
-                content = response.read().decode('utf-8')
+            response = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=10)
+            response.raise_for_status()
+            content = response.text
                 
             # Filtra linee vuote o commenti
             valid_ips = [line.strip() for line in content.splitlines() if line.strip() and not line.startswith('#')]
