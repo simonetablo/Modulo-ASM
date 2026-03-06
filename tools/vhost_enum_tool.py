@@ -90,6 +90,7 @@ class VhostEnumTool(Tool):
         for group_key, group_domains in param_groups.items():
             timing, max_rate = group_key
             base_args = self._build_args(params, timing, max_rate)
+            scan_type = params.get('scan_type', 'fast').lower()
 
             # Raggruppa internamente per (IPs, port, base_domain) per evitare scan duplicati
             ip_groups = {}
@@ -127,7 +128,7 @@ class VhostEnumTool(Tool):
                 for (t_ips, port, base_domain), targets_info in ip_groups.items():
                     futures.append(
                         executor.submit(
-                            self._scan_ip_group, targets_info, list(t_ips), port, base_domain, base_args, wordlist
+                            self._scan_ip_group, targets_info, list(t_ips), port, base_domain, base_args, wordlist, scan_type
                         )
                     )
                 # Attendiamo e logghiamo eventuali eccezioni fatali nei thread (evitando il silent-fail)
@@ -209,7 +210,7 @@ class VhostEnumTool(Tool):
                     pass
         return target_ips
 
-    def _scan_ip_group(self, targets_info: List[tuple], target_ips: List[str], port: str, base_domain: str, base_args: List[str], wordlist: str) -> None:
+    def _scan_ip_group(self, targets_info: List[tuple], target_ips: List[str], port: str, base_domain: str, base_args: List[str], wordlist: str, scan_type: str = "fast") -> None:
         """
         Esegue il vhost enumeration su un gruppo di target con stesso (IPs, porta, base_domain).
         Esegue ffuf SOLO SU UNO DEI DOMINI come 'rappresentativo' per gli header (es. X-Forwarded-Host),
@@ -220,10 +221,16 @@ class VhostEnumTool(Tool):
         
         representative_domain = targets_info[0][1]
         
-        routing_headers = [
-            (header_name, header_format.format(domain=base_domain))
-            for header_name, header_format in self.ROUTING_HEADERS_FORMATS
-        ]
+        # Filtro Header: Ottimizzazione per scansioni fast/accurate
+        if scan_type in ("fast", "accurate"):
+            routing_headers = [
+                ("Host", "FUZZ.{domain}".format(domain=base_domain))
+            ]
+        else:
+            routing_headers = [
+                (header_name, header_format.format(domain=base_domain))
+                for header_name, header_format in self.ROUTING_HEADERS_FORMATS
+            ]
         
         for target_ip in target_ips:
             # Opt: Format IPv6 address safely if present

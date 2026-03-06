@@ -22,7 +22,7 @@ from tools.content_discovery_tool import ContentDiscoveryTool
 from tools.dns_manager_tool import DnsManagerTool
 
 def safe_load_json(data_str: str) -> dict:
-    """Helper robusto per il parsing sicuro dell'output dei tool in formato JSON."""
+    """Helper per il parsing sicuro dell'output dei tool in formato JSON."""
     try:
         if not data_str or not data_str.strip():
             return {}
