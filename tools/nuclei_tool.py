@@ -12,13 +12,13 @@ class NucleiTool(Tool):
     Esegue scansioni di fingerprinting avanzato e vulnerability scanning su risorse web (URL).
     """
 
-    # Definizione dei profili di scansione. In ASM ci concentriamo su info-gathering e misconfigurations.
+    # Definizione dei profili di scansione. In ASM ci concentriamo ESCLUSIVAMENTE sul fingerprinting tecnologico.
+    # Disabilitati i template di vulnerabilità attiva (cve, sqli, rce) per evitare falsi positivi o blocchi.
     SCAN_PROFILES = {
-        "fast": ["-tags", "tech,exposure", "-severity", "info,low", "-c", "50", "-bs", "50"],
-        "accurate": ["-tags", "tech,exposure,config", "-severity", "info,low,medium", "-c", "25", "-bs", "25"],
-        "comprehensive": ["-tags", "tech,exposure,config,misconfig,takeover", "-c", "100", "-bs", "100"],
-        "stealth": ["-tags", "tech,exposure", "-severity", "info", "-rl", "50", "-c", "2", "-timeout", "10"],
-        "noisy": ["-tags", "tech,exposure,config,cve,default-login,fuzz", "-c", "150", "-bs", "150"]
+        "fast": ["-tags", "tech", "-severity", "info", "-c", "50", "-bs", "50"],
+        "accurate": ["-tags", "tech", "-severity", "info", "-c", "25", "-bs", "25"],
+        "comprehensive": ["-tags", "tech", "-severity", "info", "-c", "100", "-bs", "100"],
+        "stealth": ["-tags", "tech", "-severity", "info", "-rl", "50", "-c", "2", "-timeout", "10"]
     }
 
     def __init__(self):
@@ -99,7 +99,15 @@ class NucleiTool(Tool):
         if scan_type not in self.SCAN_PROFILES:
             scan_type = 'fast'
             
-        cmd = [self.nuclei_path, "-jsonl", "-silent", "-nc", "-ni"]
+        cmd = [
+            self.nuclei_path, 
+            "-jsonl", 
+            "-silent", 
+            "-nc", 
+            "-ni",
+            # Bando totale e assoluto di qualsiasi template di DAST / VA / Exploiting
+            "-etags", "cve,sqli,xss,rce,fuzz,dos,auth-bypass,takeover,lfi,ssrf,injection,misconfig"
+        ]
         
         cmd.extend(self.SCAN_PROFILES[scan_type])
         
@@ -174,7 +182,19 @@ class NucleiTool(Tool):
                                 "matched_at": record.get("matched-at", ""),
                                 "description": record.get("info", {}).get("description", "")
                             }
-                            # Opzionale: aggiunge tags per categorizzare
+                            # Estrai eventuali match specifici (es. versione o stringe regex catturate dal matcher)
+                            extracted = record.get("extracted-results", [])
+                            if extracted:
+                                finding["extracted_results"] = extracted
+                                
+                            matcher_name = record.get("matcher-name", "")
+                            if matcher_name:
+                                finding["matcher_name"] = matcher_name
+                                
+                            ip_addr = record.get("ip", "")
+                            if ip_addr:
+                                finding["ip"] = ip_addr
+
                             tags = record.get("info", {}).get("tags", [])
                             if tags:
                                 finding["tags"] = tags

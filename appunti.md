@@ -98,9 +98,9 @@ _API CALLS_
 All'interno delle call API potrebbero essere inseriti parametri aggiuntivi (oltre al dominio target) per diverse tipologie di scan, ad esempio:
 
 - Fast
+- Accurate
 - Comprehensive
 - Stealth
-- Noisy
 
 _ORCHESTRATORE PYTHON_
 

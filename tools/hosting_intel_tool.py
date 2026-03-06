@@ -49,15 +49,21 @@ class HostingIntelTool(Tool):
         scan_type = params.get("scan_type", "fast").lower()
 
         # Determina fallback e timeout in base al profilo di scansione
-        if scan_type in ("fast", "noisy"):
+        if scan_type == "fast":
             fallback_count = min(2, len(self.dns_resolvers))
             timeout_sec = 2.0
         elif scan_type == "stealth":
             fallback_count = min(1, len(self.dns_resolvers))
             timeout_sec = 10.0
-        else: # accurate, comprehensive
-            fallback_count = min(4, len(self.dns_resolvers))
+        elif scan_type == "accurate":
+            fallback_count = min(3, len(self.dns_resolvers))
             timeout_sec = 5.0
+        elif scan_type == "comprehensive":
+            fallback_count = min(4, len(self.dns_resolvers))
+            timeout_sec = 8.0
+        else:
+            fallback_count = min(2, len(self.dns_resolvers))
+            timeout_sec = 2.0
             
         print(f"Avvio analisi infrastruttura su {len(domains)} target (fallback={fallback_count}, timeout={timeout_sec}s)...", file=sys.stderr)
 

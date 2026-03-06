@@ -19,8 +19,7 @@ class SpiderTool(Tool):
         "fast": {"depth": 1, "rate": 50, "timeout": 5},
         "accurate": {"depth": 2, "rate": 100, "timeout": 10},
         "comprehensive": {"depth": 3, "rate": 0, "timeout": 15},
-        "stealth": {"depth": 1, "rate": 5, "timeout": 10},
-        "noisy": {"depth": 3, "rate": 200, "timeout": 10}
+        "stealth": {"depth": 1, "rate": 5, "timeout": 10}
     }
 
     def __init__(self):

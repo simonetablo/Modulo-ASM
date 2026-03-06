@@ -17,24 +17,20 @@ class SubdomainEnumTool(Tool):
 
     SCAN_PROFILES = {
         "fast": {
-            "wordlist": "wordlists/test_subs.txt",
+            "wordlist": "wordlists/subdomains.txt",
             "flags": ["-l", "1000"]
         },
         "accurate": {
-            "wordlist": "wordlists/test_subs.txt",
+            "wordlist": "wordlists/subdomains.txt",
             "flags": ["-l", "5000"]
         },
         "comprehensive": {
-            "wordlist": "wordlists/test_subs.txt",
+            "wordlist": "wordlists/subdomains.txt",
             "flags": ["-l", "500"] 
         },
         "stealth": {
-            "wordlist": "wordlists/test_subs.txt",
+            "wordlist": "wordlists/subdomains.txt",
             "flags": ["-l", "100"]
-        },
-        "noisy": {
-            "wordlist": "wordlists/test_subs.txt",
-            "flags": ["-l", "10000"]
         }
     }
 
@@ -147,7 +143,7 @@ class SubdomainEnumTool(Tool):
                             
                         # Wildcard Check (Early-Exit): lo eseguiamo solo nei profili 'fast' o 'stealth'
                         # per risparmiare query inutili sui resolver sui rami catch-all.
-                        # Per 'comprehensive' o 'noisy', lasciamo fare l'intero lavoro all'algoritmo
+                        # Per 'comprehensive' lasciamo fare l'intero lavoro all'algoritmo
                         # interno di puredns, che è più preciso ma più lento/dispendioso.
                         skip_bruteforce = False
                         if scan_type in ["fast", "stealth"]:

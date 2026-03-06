@@ -137,10 +137,10 @@ class IPRotationTool(Tool):
                 self.ip_history[domain].append((timestamp, ip))
                 
                 # Log solo se c'è un cambio di IP
-                if len(self.ip_history[domain]) > 1:
-                    prev_ip = self.ip_history[domain][-2][1]
-                    if ip != prev_ip:
-                        print(f"[IP Monitor] ⚠️  IP CHANGE detected for {domain}: {prev_ip} -> {ip}", file=sys.stderr)
+                #if len(self.ip_history[domain]) > 1:
+                #    prev_ip = self.ip_history[domain][-2][1]
+                #    if ip != prev_ip:
+                #        print(f"[IP Monitor] ⚠️  IP CHANGE detected for {domain}: {prev_ip} -> {ip}", file=sys.stderr)
                 
         except (dns.resolver.NXDOMAIN, dns.resolver.NoAnswer, dns.resolver.Timeout):
             # Errore di risoluzione DNS - ignora silenziosamente

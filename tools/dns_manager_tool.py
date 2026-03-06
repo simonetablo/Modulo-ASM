@@ -238,7 +238,7 @@ class DnsManagerTool(Tool):
         if not domains:
             return []
             
-        print(f"  [*] Double check su {len(domains)} domini con DNS fidati (DoH Proxy mode: {use_doh})...", file=sys.stderr)
+        print(f"Double check su {len(domains)} domini con DNS fidati (DoH Proxy mode: {use_doh})...", file=sys.stderr)
         
         if use_doh:
             valid_domains = []

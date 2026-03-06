@@ -33,9 +33,6 @@ class VhostEnumTool(Tool):
         },
         "stealth": {
             "flags": ["-ac", "-mc", "all", "-t", "5", "-timeout", "10", "-p", "0.5-1.5"]
-        },
-        "noisy": {
-            "flags": ["-ac", "-mc", "all", "-t", "150", "-timeout", "5"]
         }
     }
 
@@ -79,7 +76,6 @@ class VhostEnumTool(Tool):
         if not domains:
             return
 
-        # Determina la wordlist da usare
         wordlist = params.get("vhost_wordlist") or params.get("wordlist") or "wordlists/vhosts.txt"
         
         if not os.path.exists(wordlist):
@@ -88,30 +84,59 @@ class VhostEnumTool(Tool):
                 self.results[target] = {"error": f"Wordlist non trovata: {wordlist}"}
             return
 
-        # Raggruppa i target in base ai loro parametri di scansione
         param_groups = self._group_by_params(domains, target_params or {})
-
         print(f"Grouped {len(domains)} targets into {len(param_groups)} parameter groups for vhost enum", file=sys.stderr)
 
-        # Scansiona ogni gruppo di parametri
         for group_key, group_domains in param_groups.items():
             timing, max_rate = group_key
-
-            # Costruisce gli argomenti ffuf per questo gruppo
             base_args = self._build_args(params, timing, max_rate)
 
-            print(f"VHost scanning {len(group_domains)} targets (timing={timing}, max_rate={max_rate})", file=sys.stderr)
+            # Raggruppa internamente per (IPs, port, base_domain) per evitare scan duplicati
+            ip_groups = {}
+            
+            def _resolve_target(target):
+                parts = target.split(':')
+                domain = parts[0]
+                port = parts[1] if len(parts) > 1 else "80"
+                base_domain = domain_to_base.get(domain) if domain_to_base else None
+                if not base_domain:
+                    parts_d = domain.split('.')
+                    base_domain = f"{parts_d[-2]}.{parts_d[-1]}" if len(parts_d) >= 2 else domain
+                
+                target_ips = self._get_target_ips(domain, base_domain, origin_results, domain_ip_map)
+                return target, domain, port, base_domain, tuple(sorted(target_ips))
+            
+            with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+                resolved_targets = list(executor.map(_resolve_target, group_domains))
+                
+            for target, domain, port, base_domain, t_ips in resolved_targets:
+                if not t_ips:
+                    print(f"ERRORE: Impossibile risolvere {domain} per vhost enumeration", file=sys.stderr)
+                    self.results[target] = {"error": f"Impossibile risolvere il dominio {domain}"}
+                    continue
+                    
+                ip_key = (t_ips, port, base_domain)
+                if ip_key not in ip_groups:
+                    ip_groups[ip_key] = []
+                ip_groups[ip_key].append((target, domain))
+            
+            print(f"VHost scanning {len(ip_groups)} unique IP/port/base_domain combos for {len(group_domains)} targets (timing={timing}, max_rate={max_rate})", file=sys.stderr)
 
-            # Scansiona i target nel gruppo in parallelo
             with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
-                futures = [
-                    executor.submit(
-                        self._scan_target, target, base_args, wordlist, origin_results, domain_to_base, domain_ip_map
+                futures = []
+                for (t_ips, port, base_domain), targets_info in ip_groups.items():
+                    futures.append(
+                        executor.submit(
+                            self._scan_ip_group, targets_info, list(t_ips), port, base_domain, base_args, wordlist
+                        )
                     )
-                    for target in group_domains
-                ]
-                # Attendiamo il completamento di tutti
-                concurrent.futures.wait(futures)
+                # Attendiamo e logghiamo eventuali eccezioni fatali nei thread (evitando il silent-fail)
+                done, _ = concurrent.futures.wait(futures)
+                for f in done:
+                    try:
+                        f.result()
+                    except Exception as e:
+                        print(f"Errore critico in un thread VHost Enum: {e}", file=sys.stderr)
 
     def _group_by_params(self, domains: List[str], target_params: Dict[str, Dict]) -> Dict[tuple, List[str]]:
         """
@@ -160,82 +185,65 @@ class VhostEnumTool(Tool):
 
         return cmd
 
-    def _scan_target(self, target: str, base_args: List[str], wordlist: str, origin_results: Dict[str, Any] = None, domain_to_base: Dict[str, str] = None, domain_ip_map: Dict[str, str] = None) -> None:
-        """
-        Esegue il vhost enumeration su un singolo target.
-        
-        Risolve il dominio a IP e configura ffuf per fuzzare l'header Host:
-        inviando richieste all'IP con header Host: FUZZ.<dominio_base>
-
-        Args:
-            target: Target nel formato 'dominio:porta'
-            base_args: Argomenti ffuf base costruiti da _build_args
-            wordlist: Percorso alla wordlist per il fuzzing
-            origin_results: Dizionario con risultati OriginIpTool
-            domain_to_base: Mapping target -> base_domain
-            domain_ip_map: Mapping target -> pre-resolved IP (from HostingIntelTool)
-        """
-        # Parsing del target: dominio:porta
-        parts = target.split(':')
-        domain = parts[0]
-        port = parts[1] if len(parts) > 1 else "80"
-
-        # Recupera base_domain dalla mappa passata, o fai fallback se non trovato
-        base_domain = domain_to_base.get(domain) if domain_to_base else None
-        if not base_domain:
-            parts_d = domain.split('.')
-            base_domain = f"{parts_d[-2]}.{parts_d[-1]}" if len(parts_d) >= 2 else domain
-
+    def _get_target_ips(self, domain: str, base_domain: str, origin_results: Dict[str, Any], domain_ip_map: Dict[str, str]) -> List[str]:
         target_ips = []
         origin_info = origin_results.get(base_domain, {}) if origin_results else {}
         
         if origin_info.get("is_behind_cdn") and origin_info.get("origin_ips"):
             target_ips = origin_info["origin_ips"]
-            print(f"[*] {domain} è dietro CDN. VHost Enum su {len(target_ips)} Origin IPs ({target_ips})", file=sys.stderr)
         else:
-            # Optmization: Use pre-resolved IP if available to avoid redundant DNS lookups
             pre_resolved_ip = domain_ip_map.get(domain) if domain_ip_map else None
             if pre_resolved_ip:
                 target_ips = [pre_resolved_ip]
             else:
                 try:
-                    # Fallback mode using fast/noisy scanning profile for dynamic resolver selection
                     fallback_count = min(2, len(self.dns_resolvers))
                     timeout_sec = 2.0
-                    
                     resolver = dns.resolver.Resolver(configure=False)
                     resolver.nameservers = random.sample(self.dns_resolvers, fallback_count) if self.dns_resolvers else ['8.8.8.8']
                     resolver.timeout = timeout_sec
                     resolver.lifetime = timeout_sec * fallback_count
-                    
                     answers = resolver.resolve(domain, 'A')
                     target_ips = [str(answers[0])]
-                except (dns.resolver.NXDOMAIN, dns.resolver.NoAnswer, dns.resolver.Timeout, dns.exception.DNSException) as e:
-                    print(f"ERRORE: Impossibile risolvere {domain} per vhost enumeration -> {e}", file=sys.stderr)
-                    self.results[target] = {"error": f"Impossibile risolvere il dominio {domain}"}
-                    return
+                except (dns.resolver.NXDOMAIN, dns.resolver.NoAnswer, dns.resolver.Timeout, dns.exception.DNSException):
+                    pass
+        return target_ips
 
+    def _scan_ip_group(self, targets_info: List[tuple], target_ips: List[str], port: str, base_domain: str, base_args: List[str], wordlist: str) -> None:
+        """
+        Esegue il vhost enumeration su un gruppo di target con stesso (IPs, porta, base_domain).
+        Esegue ffuf SOLO SU UNO DEI DOMINI come 'rappresentativo' per gli header (es. X-Forwarded-Host),
+        ma popola i risultati per tutti i target nel gruppo evitando richieste identiche a ffuf.
+        """
         scheme = "https" if port in ("443", "8443") else "http"
         all_discovered = []
         
-        # Generiamo i routing headers usando il BASE DOMAIN (non il sottodominio).
-        # L'obiettivo del vhost fuzzing è scoprire vhost fratelli: FUZZ.example.com,
-        # non FUZZ.api.example.com.
+        representative_domain = targets_info[0][1]
+        
         routing_headers = [
             (header_name, header_format.format(domain=base_domain))
             for header_name, header_format in self.ROUTING_HEADERS_FORMATS
         ]
         
         for target_ip in target_ips:
-            target_url = f"{scheme}://{target_ip}:{port}/"
+            # Opt: Format IPv6 address safely if present
+            formatted_ip = f"[{target_ip}]" if ":" in target_ip else target_ip
+            target_url = f"{scheme}://{formatted_ip}:{port}/"
             
             for header_name, header_payload in routing_headers:
                 cmd = list(base_args)
                 
-                # Se non stiamo fuzzando l'Host standard, dobbiamo comunque inviare un Host valido 
-                # per evitare che il webserver (o la CDN/WAF) scarti a priori la richiesta malformata.
+                # Opt: Always pass a valid SNI on HTTPS proxy connections
+                # Server / CDNs will drop requests to absolute IPs without an SNI matching a known config
+                if scheme == "https":
+                    # Usiamo il base_domain (es. target.com) invece del sottodominio specifico, 
+                    # perchè il fuzzing lavora allo stesso livello (FUZZ.target.com) ed il certificato 
+                    # installato è spesso un Wildcard (*.target.com). Passare un sottodominio come 
+                    # SNI e chiederne un altro via Host Header triggera blocchi WAF per SNI-Mismatch.
+                    cmd.extend(["-sni", base_domain])
+                
                 if header_name != "Host":
-                    cmd.extend(["-H", f"Host: {domain}"])
+                    cmd.extend(["-H", f"Host: {representative_domain}"])
                 
                 cmd.extend([
                     "-u", target_url,
@@ -243,7 +251,7 @@ class VhostEnumTool(Tool):
                     "-w", wordlist
                 ])
 
-                print(f"VHost enum su {domain} (-> {target_ip}:{port}) via {header_name}", file=sys.stderr)
+                print(f"VHost enum su {representative_domain} (-> {target_ip}:{port}) via {header_name} (gruppo di {len(targets_info)} target)", file=sys.stderr)
 
                 try:
                     process = subprocess.run(
@@ -252,25 +260,23 @@ class VhostEnumTool(Tool):
 
                     if process.returncode != 0 and not process.stdout:
                         error_msg = process.stderr.strip() if process.stderr else f"ffuf exit code: {process.returncode}"
-                        print(f"Errore ffuf su {target} (IP: {target_ip} Header: {header_name}): {error_msg}", file=sys.stderr)
+                        print(f"Errore ffuf su {representative_domain} (IP: {target_ip} Header: {header_name}): {error_msg}", file=sys.stderr)
                         continue
 
-                    discovered = self._parse_ffuf_output(process.stdout, domain)
+                    discovered = self._parse_ffuf_output(process.stdout, base_domain)
                     for v in discovered:
                         v["target_ip_used"] = target_ip
-                        v["bypassed_via"] = header_name # Tracciamo come è stato scoperto
+                        v["bypassed_via"] = header_name
                     all_discovered.extend(discovered)
 
                     if discovered:
-                        print(f"  [+] {len(discovered)} vhost trovati su {target} (IP: {target_ip}) via {header_name}", file=sys.stderr)
+                        print(f"  [+] {len(discovered)} vhost trovati su {representative_domain} (IP: {target_ip}) via {header_name} per {len(targets_info)} target", file=sys.stderr)
 
                 except subprocess.TimeoutExpired:
-                    print(f"Timeout durante vhost enum su {target} (IP: {target_ip} Header: {header_name})", file=sys.stderr)
+                    print(f"Timeout durante vhost enum su {representative_domain} (IP: {target_ip} Header: {header_name})", file=sys.stderr)
                 except Exception as e:
-                    print(f"Eccezione durante vhost enum su {target}: {str(e)}", file=sys.stderr)
+                    print(f"Eccezione durante vhost enum su {representative_domain}: {str(e)}", file=sys.stderr)
 
-        # De-duplicazione dei risultati: se un vhost è trovato tramite routing diversi,
-        # lo manteniamo una sola volta (preferendo tener traccia del bypass se possibile)
         unique_vhosts = {}
         for v in all_discovered:
             k = v["vhost"]
@@ -279,13 +285,15 @@ class VhostEnumTool(Tool):
                 
         final_vhosts = list(unique_vhosts.values())
 
-        self.results[target] = {
-            "domain": domain,
-            "port": port,
-            "discovered_vhosts": final_vhosts,
-            "count": len(final_vhosts),
-            "ips_scanned": target_ips
-        }
+        # Popola risultati per tutti i target del gruppo senza dover lanciare ffuf per ognuno
+        for target, domain in targets_info:
+            self.results[target] = {
+                "domain": domain,
+                "port": port,
+                "discovered_vhosts": final_vhosts,
+                "count": len(final_vhosts),
+                "ips_scanned": target_ips
+            }
 
     def _parse_ffuf_output(self, stdout: str, base_domain: str) -> List[Dict[str, Any]]:
         """

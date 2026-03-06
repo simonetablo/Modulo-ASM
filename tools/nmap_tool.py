@@ -14,8 +14,7 @@ class NmapTool(Tool):
         "fast": "-F",
         "accurate": "--top-ports 1000 -sV --version-intensity 9 -sC",
         "comprehensive": "-sS -sV -sC -sU -p U:53,161,162,111,123,137,138,500,514,1434,T:1-65535",
-        "stealth": "-sS",
-        "noisy": "-p- -T5 --script default,discovery,safe"
+        "stealth": "-sS"
     }
 
     def __init__(self):
@@ -100,7 +99,7 @@ class NmapTool(Tool):
             
         args = self.SCAN_PROFILES[scan_type]
         
-        # Aggiunge il parametro di timing se non esplicitamente definito nel profilo (es. noisy ha -T5)
+        # Aggiunge il parametro di timing se non esplicitamente definito nel profilo
         if "-T" not in args:
             if timing == 'polite':
                 args += ' -T2'  # Polite timing

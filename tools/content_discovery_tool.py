@@ -50,8 +50,7 @@ class ContentDiscoveryTool(Tool):
         "fast": {"threads": 50, "rate": 0, "timeout": 5, "recursion_depth": 0},
         "accurate": {"threads": 30, "rate": 50, "timeout": 8, "recursion_depth": 1},
         "comprehensive": {"threads": 40, "rate": 0, "timeout": 10, "recursion_depth": 2},
-        "stealth": {"threads": 5, "rate": 10, "timeout": 15, "recursion_depth": 0},
-        "noisy": {"threads": 100, "rate": 0, "timeout": 5, "recursion_depth": 2}
+        "stealth": {"threads": 5, "rate": 10, "timeout": 15, "recursion_depth": 0}
     }
 
     def __init__(self, wordlist_path: str = None):
@@ -156,7 +155,7 @@ class ContentDiscoveryTool(Tool):
             is_cdn = target_data.get("is_cdn", False) or target_data.get("cdn", False)
             
             # Se è dietro CDN e stiamo scansionando aggressivo, abbassiamo un po' i thread per non essere bloccati
-            if is_cdn and scan_type in ["accurate", "comprehensive", "noisy"]:
+            if is_cdn and scan_type in ["accurate", "comprehensive"]:
                  print(f"[{url}] CDN rilevata, autolimitazione dei thread temporanea per evitare ban WAF.", file=sys.stderr)
                  profile = profile.copy() # evitiamo di modificare il dict originale globale
                  profile["threads"] = min(profile["threads"], 20)

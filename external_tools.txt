@@ -6,3 +6,5 @@ ALTERX:     go install -v github.com/subfinder/alterx@latest
 NMAP:       sudo apt install nmap
 FFUF:       go install -v github.com/ffuf/ffuf/v2@latest
 NUCLEI:     go install -v github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest
+KATANA:     go install github.com/projectdiscovery/katana/cmd/katana@latest
+JSLUICE:    go install github.com/BishopFox/jsluice/cmd/jsluice@latest
