@@ -6,6 +6,8 @@ import random
 import os
 import dns.resolver
 import dns.exception
+import re
+import tldextract
 import concurrent.futures
 from typing import List, Dict, Any
 from .base_tool import Tool
@@ -62,7 +64,7 @@ class VhostEnumTool(Tool):
         
         Args:
             domains (List[str]): Lista dei target web (formato 'dominio:porta').
-            params (Dict[str, Any]): Parametri della scansione (scan_type, eration su 4 tarwordlist).
+            params (Dict[str, Any]): Parametri della scansione (scan_type, wordlist).
             target_params (Dict[str, Dict]): Parametri specifici per ogni target (timing, max_rate).
             origin_results (Dict[str, Any]): Risultati da OriginIpTool con i mapping CDN/Origin IPs.
             domain_to_base (Dict[str, str]): Mappa un dominio/target al suo base_domain precalcolato.
@@ -101,8 +103,12 @@ class VhostEnumTool(Tool):
                 port = parts[1] if len(parts) > 1 else "80"
                 base_domain = domain_to_base.get(domain) if domain_to_base else None
                 if not base_domain:
-                    parts_d = domain.split('.')
-                    base_domain = f"{parts_d[-2]}.{parts_d[-1]}" if len(parts_d) >= 2 else domain
+                    ipv4_pattern = re.compile(r"^(?:[0-9]{1,3}\.){3}[0-9]{1,3}$")
+                    if ipv4_pattern.match(domain) or ":" in domain:
+                        base_domain = domain
+                    else:
+                        extracted = tldextract.extract(domain)
+                        base_domain = extracted.registered_domain if extracted.registered_domain else domain
                 
                 target_ips = self._get_target_ips(domain, base_domain, origin_results, domain_ip_map)
                 return target, domain, port, base_domain, tuple(sorted(target_ips))

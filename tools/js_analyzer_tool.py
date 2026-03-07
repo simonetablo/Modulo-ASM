@@ -98,7 +98,12 @@ class JsAnalyzerTool(Tool):
         print(f"Avvio Javascript Static Analysis (jsluice) su {len(js_urls)} file ({len(batches)} batch da max {batch_size})...", file=sys.stderr)
         with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = [executor.submit(_process_js_batch, batch) for batch in batches]
-            concurrent.futures.wait(futures)
+            done, _ = concurrent.futures.wait(futures)
+            for f in done:
+                try:
+                    f.result()
+                except Exception as e:
+                    print(f"Errore in un thread JS Analyzer: {e}", file=sys.stderr)
             
         # Stampa riepilogo e converte i set in liste per la serializzazione JSON
         for d in list(self.results.keys()):

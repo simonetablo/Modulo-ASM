@@ -5,6 +5,7 @@ import subprocess
 import sys
 import threading
 import concurrent.futures
+import uuid
 from typing import List, Dict, Any
 from .base_tool import Tool
 
@@ -167,8 +168,8 @@ class ContentDiscoveryTool(Tool):
             if base_domain in dynamic_wordlists and dynamic_wordlists[base_domain]:
                  paths = dynamic_wordlists[base_domain]
                  print(f"[{url}] Ricevuti {len(paths)} endpoint dinamici dallo spidering. Li converto in wordlist locale.", file=sys.stderr)
-                 # Salva temporaneamente il set in \tmp
-                 dyn_wl_file = f"/tmp/asm_dyn_wl_{base_domain}.txt"
+                 # Salva temporaneamente il set in \tmp (usa uuid per evitare race condition fra thread che scansionano sotto-dir dello stesso dominio)
+                 dyn_wl_file = f"/tmp/asm_dyn_wl_{base_domain}_{uuid.uuid4().hex[:8]}.txt"
                  with open(dyn_wl_file, "w") as f:
                       for p in paths:
                            # Ffuf prepend the slash normally so we ensure paths don't start with / internally here to avoid double slash
@@ -176,18 +177,24 @@ class ContentDiscoveryTool(Tool):
                            if clean_p:
                                f.write(f"{clean_p}\n")
 
-            # 3. Costruzione e Lancio Comando FFUF
-            self._execute_ffuf(url, ext_flag, profile, scan_type, recursion_depth, tech_wordlists, dyn_wl_file)
-            
-            if dyn_wl_file and os.path.exists(dyn_wl_file):
-                 try:
-                     os.remove(dyn_wl_file)
-                 except: pass
+            try:
+                # 3. Costruzione e Lancio Comando FFUF
+                self._execute_ffuf(url, ext_flag, profile, scan_type, recursion_depth, tech_wordlists, dyn_wl_file)
+            finally:
+                if dyn_wl_file and os.path.exists(dyn_wl_file):
+                     try:
+                         os.remove(dyn_wl_file)
+                     except: pass
 
         max_workers = min(3, len(targets) if targets else 1)
         with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = [executor.submit(_process_target, url) for url in targets]
-            concurrent.futures.wait(futures)
+            done, _ = concurrent.futures.wait(futures)
+            for f in done:
+                try:
+                    f.result()
+                except Exception as e:
+                    print(f"Errore in un thread Content Discovery: {e}", file=sys.stderr)
 
     def _calculate_extensions(self, url: str, httpx_results: Dict[str, Any]) -> List[str]:
          """

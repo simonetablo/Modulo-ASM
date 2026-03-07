@@ -66,7 +66,12 @@ class SpiderTool(Tool):
         max_workers = min(3, len(targets) if targets else 1)
         with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = [executor.submit(_process_target, url) for url in targets]
-            concurrent.futures.wait(futures)
+            done, _ = concurrent.futures.wait(futures)
+            for f in done:
+                try:
+                    f.result()
+                except Exception as e:
+                    print(f"Errore in un thread Spider: {e}", file=sys.stderr)
 
     def _execute_katana(self, url: str, profile: Dict[str, Any], scan_type: str, base_domain: str) -> None:
         cmd = [

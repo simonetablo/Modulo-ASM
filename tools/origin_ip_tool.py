@@ -7,6 +7,9 @@ import requests
 import urllib3
 import concurrent.futures
 import difflib
+from cryptography import x509
+from cryptography.hazmat.backends import default_backend
+from cryptography.x509.oid import ExtensionOID, NameOID
 from typing import List, Dict, Any, Tuple
 from urllib.parse import urlparse
 from .base_tool import Tool
@@ -167,28 +170,34 @@ class OriginIpTool(Tool):
         Estrae il certificato e verifica che il dominio atteso sia nei SAN o nel CN.
         """
         try:
+
             context = ssl.create_default_context()
             context.check_hostname = False
             context.verify_mode = ssl.CERT_NONE  # Ignoriamo chain issues (es. Let's Encrypt scaduti) 
             
             with socket.create_connection((ip, 443), timeout=self.CONNECTION_TIMEOUT) as sock:
                 with context.wrap_socket(sock, server_hostname=base_domain) as ssock:
-                    cert = ssock.getpeercert(binary_form=False)
-                    if not cert:
+                    der_cert = ssock.getpeercert(binary_form=True)
+                    if not der_cert:
                          return False
                     
+                    cert = x509.load_der_x509_certificate(der_cert, default_backend())
+                    
                     # Cerca nei Subject Alternative Names (SAN)
-                    if 'subjectAltName' in cert:
-                        for key, value in cert['subjectAltName']:
-                            if key == 'DNS' and (value == base_domain or value == f"*.{base_domain}"):
+                    try:
+                        ext = cert.extensions.get_extension_for_oid(ExtensionOID.SUBJECT_ALTERNATIVE_NAME)
+                        sans = ext.value.get_values_for_type(x509.DNSName)
+                        for value in sans:
+                            if value == base_domain or value == f"*.{base_domain}":
                                 return True
+                    except x509.ExtensionNotFound:
+                        pass
                                 
                     # Cerca nel Common Name (CN) se non trovato nei SAN
-                    if 'subject' in cert:
-                        for entry in cert['subject']:
-                            for key, value in entry:
-                                if key == 'commonName' and (value == base_domain or value == f"*.{base_domain}"):
-                                    return True
+                    for attr in cert.subject.get_attributes_for_oid(NameOID.COMMON_NAME):
+                        value = attr.value
+                        if isinstance(value, str) and (value == base_domain or value == f"*.{base_domain}"):
+                            return True
         except Exception:
              pass
         return False
@@ -202,7 +211,8 @@ class OriginIpTool(Tool):
         
         try:
             resp = requests.get(target_url, headers=self.DEFAULT_HEADERS, timeout=self.READ_TIMEOUT, verify=False, allow_redirects=True)
-            baseline['headers'] = dict(resp.headers)
+            baseline['headers'] = {k.lower(): v for k, v in resp.headers.items()}
+            baseline['cookies'] = list(resp.cookies.keys())
             baseline['body_length'] = len(resp.text)
             baseline['body'] = resp.text
             baseline['title'] = self._extract_title(resp.text)
@@ -213,7 +223,8 @@ class OriginIpTool(Tool):
             try:
                 target_url = f"http://{base_domain}"
                 resp = requests.get(target_url, headers=self.DEFAULT_HEADERS, timeout=self.READ_TIMEOUT, verify=False, allow_redirects=True)
-                baseline['headers'] = dict(resp.headers)
+                baseline['headers'] = {k.lower(): v for k, v in resp.headers.items()}
+                baseline['cookies'] = list(resp.cookies.keys())
                 baseline['body_length'] = len(resp.text)
                 baseline['body'] = resp.text
                 baseline['title'] = self._extract_title(resp.text)
@@ -234,8 +245,8 @@ class OriginIpTool(Tool):
         baseline_title = baseline.get('title', '')
         
         # Header "sensibili" che indicano forte somiglianza se matchano esplicitamente
-        signature_keys = ['Server', 'X-Powered-By', 'Set-Cookie']
-        custom_signatures = {k: v for k, v in baseline_headers.items() if k in signature_keys or k.startswith('X-')}
+        signature_keys = ['server', 'x-powered-by', 'set-cookie']
+        custom_signatures = {k: v for k, v in baseline_headers.items() if k in signature_keys or k.startswith('x-')}
 
         for url in test_urls:
             for header_name, header_payload in self.ROUTING_HEADERS:
@@ -249,7 +260,7 @@ class OriginIpTool(Tool):
                 
                 try:
                     resp = requests.get(url, headers=req_headers, timeout=self.READ_TIMEOUT, verify=False, allow_redirects=False)
-                    resp_headers = dict(resp.headers)
+                    resp_headers = {k.lower(): v for k, v in resp.headers.items()}
                     resp_body = resp.text
                     resp_title = self._extract_title(resp_body)
                     
@@ -258,11 +269,11 @@ class OriginIpTool(Tool):
                     for sig_key, sig_val in custom_signatures.items():
                         if sig_key in resp_headers:
                             # Controlliamo substring nei cookie o match esatti in altri header
-                            if sig_key == 'Set-Cookie':
-                                # Estrarre il key name del cookie (es. PHPSESSID)
-                                base_cookie_keys = [c.split('=')[0] for c in sig_val.split(';')]
-                                resp_cookie_keys = [c.split('=')[0] for c in resp_headers[sig_key].split(';')]
-                                if any(bk in resp_cookie_keys for bk in base_cookie_keys):
+                            if sig_key == 'set-cookie':
+                                # Estrarre i cookie name tracciati in precedenza e compararli
+                                base_cookie_keys = baseline.get('cookies', [])
+                                resp_cookie_keys = list(resp.cookies.keys())
+                                if any(bk in resp_cookie_keys for bk in base_cookie_keys if bk):
                                     matched_signatures += 1
                             elif resp_headers[sig_key] == sig_val:
                                 matched_signatures += 1

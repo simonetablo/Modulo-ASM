@@ -5,6 +5,8 @@ import os
 from datetime import datetime
 from typing import List, Dict, Any, Tuple
 from urllib.parse import urlparse
+import re
+import tldextract
 
 from tools.nmap_tool import NmapTool
 from tools.httpx_tool import HttpxTool
@@ -34,16 +36,21 @@ def safe_load_json(data_str: str) -> dict:
 def group_domains_by_base(domains: List[str]) -> Dict[str, List[str]]:
     """
     Raggruppa una lista di domini in base alla loro root (dominio base).
-    (es. api.azienda.com -> azienda.com)
-    Utile per gli strumenti che operano a livello di dominio base (come origin_ip_tool e vhost_enum_tool).
+    Utilizza la libreria tldextract per supportare nativamente tutti i public suffix (inclusi i double TLD).
+    Se il target è un IP (IPv4 o IPv6), lo ignora e usa l'IP stesso come "base_domain".
     """
     groups = {}
+    
+    # regex basica per ipv4
+    ipv4_pattern = re.compile(r"^(?:[0-9]{1,3}\.){3}[0-9]{1,3}$")
+    
     for d in domains:
-        parts = d.split('.')
-        if len(parts) >= 2:
-            base = f"{parts[-2]}.{parts[-1]}"
-        else:
+        if ipv4_pattern.match(d) or ":" in d:
             base = d
+        else:
+            extracted = tldextract.extract(d)
+            # registered_domain returns the root domain (e.g. google.co.uk)
+            base = extracted.registered_domain if extracted.registered_domain else d
             
         if base not in groups:
             groups[base] = []

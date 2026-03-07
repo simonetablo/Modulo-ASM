@@ -18,10 +18,14 @@ class PermutationTool(Tool):
         Inizializza il tool e verifica le dipendenze.
         """
         super().__init__()
-        self.alterx_path = shutil.which("alterx") or os.path.expanduser("~/go/bin/alterx")
-        
-        if not os.path.exists(self.alterx_path) and not shutil.which("alterx"):
-             print(f"ATTENZIONE: Eseguibile 'alterx' non trovato in {self.alterx_path} né nel PATH.", file=sys.stderr)
+        self.alterx_path = shutil.which("alterx")
+        if not self.alterx_path:
+            home_go_bin = os.path.expanduser("~/go/bin/alterx")
+            if os.path.exists(home_go_bin):
+                self.alterx_path = home_go_bin
+            else:
+                self.alterx_path = None
+                print("ATTENZIONE: Eseguibile 'alterx' non trovato. La generazione di permutazioni fallirà.", file=sys.stderr)
 
     def run(self, domains: List[str], params: Dict[str, Any]) -> None:
         """
@@ -38,58 +42,57 @@ class PermutationTool(Tool):
 
         self.results = {}
 
-        # -------------------------------------------------------------------
-        # MOTORE EURISTICO: Estrazione Pattern e Costruzione Payload AlterX
-        # -------------------------------------------------------------------
-        scan_type = params.get("scan_type", "fast").lower()
-        max_wildcards = params.get("max_wildcards", 5)
-        extracted_patterns = self._extract_patterns(domains, scan_type=scan_type, max_wildcards=max_wildcards)
-        local_payload = self._generate_payload(domains)
-        
-        # Scrive input, pattern e payload su file temporanei
-        input_file = tempfile.NamedTemporaryFile(mode='w+', delete=False, suffix='_input.txt')
-        input_file.write('\n'.join(domains))
-        input_file_path = input_file.name
-        input_file.close()
-        
+        input_file_path = None
         patterns_file_path = None
         payload_file_path = None
         common_payload_path = None
-        
-        # Se abbiamo trovato strutture logiche valide
-        if extracted_patterns:
-            patterns_file = tempfile.NamedTemporaryFile(mode='w+', delete=False, suffix='_patterns.txt')
-            # Aggiungiamo i pattern custom generati
-            patterns_file.write('\n'.join(extracted_patterns))
-            patterns_file_path = patterns_file.name
-            patterns_file.close()
-            
-            payload_file = tempfile.NamedTemporaryFile(mode='w+', delete=False, suffix='_payload.txt')
-            payload_file.write('\n'.join(local_payload))
-            payload_file_path = payload_file.name
-            payload_file.close()
-            
-            # Crea e valorizza la wordlist "Common/Generica"
-            # Se params["common_wordlist"] punta a un file valido, lo usa direttamente.
-            # Altrimenti, scrive su file temporaneo la lista hardcoded di fallback.
-            custom_common_path = params.get("common_wordlist")
-            if custom_common_path and os.path.exists(custom_common_path):
-                common_payload_path = custom_common_path
-                print(f"  [*] Uso wordlist 'common' personalizzata: {custom_common_path}", file=sys.stderr)
-            else:
-                if custom_common_path:
-                    print(f"  [!] Wordlist 'common' specificata non trovata ({custom_common_path}). Uso lista di fallback.", file=sys.stderr)
-                common_words = [
-                    "api", "vpn", "dev", "test", "stage", "prod", "beta", "uat",
-                    "admin", "app", "login", "auth", "portal", "db", "mail",
-                    "gw", "k8s", "metrics", "grafana", "sso"
-                ]
-                common_file = tempfile.NamedTemporaryFile(mode='w+', delete=False, suffix='_common.txt')
-                common_file.write('\n'.join(common_words))
-                common_payload_path = common_file.name
-                common_file.close()
 
         try:
+            # -------------------------------------------------------------------
+            # MOTORE EURISTICO: Estrazione Pattern e Costruzione Payload AlterX
+            # -------------------------------------------------------------------
+            scan_type = params.get("scan_type", "fast").lower()
+            max_wildcards = params.get("max_wildcards", 5)
+            extracted_patterns = self._extract_patterns(domains, scan_type=scan_type, max_wildcards=max_wildcards)
+            local_payload = self._generate_payload(domains)
+            
+            # Scrive input, pattern e payload su file temporanei
+            input_file = tempfile.NamedTemporaryFile(mode='w+', delete=False, suffix='_input.txt')
+            input_file.write('\n'.join(domains))
+            input_file_path = input_file.name
+            input_file.close()
+            
+            # Se abbiamo trovato strutture logiche valide
+            if extracted_patterns:
+                patterns_file = tempfile.NamedTemporaryFile(mode='w+', delete=False, suffix='_patterns.txt')
+                # Aggiungiamo i pattern custom generati
+                patterns_file.write('\n'.join(extracted_patterns))
+                patterns_file_path = patterns_file.name
+                patterns_file.close()
+                
+                payload_file = tempfile.NamedTemporaryFile(mode='w+', delete=False, suffix='_payload.txt')
+                payload_file.write('\n'.join(local_payload))
+                payload_file_path = payload_file.name
+                payload_file.close()
+                
+                # Crea e valorizza la wordlist "Common/Generica"
+                custom_common_path = params.get("common_wordlist")
+                if custom_common_path and os.path.exists(custom_common_path):
+                    common_payload_path = custom_common_path
+                    print(f"  [*] Uso wordlist 'common' personalizzata: {custom_common_path}", file=sys.stderr)
+                else:
+                    if custom_common_path:
+                        print(f"  [!] Wordlist 'common' specificata non trovata ({custom_common_path}). Uso lista di fallback.", file=sys.stderr)
+                    common_words = [
+                        "api", "vpn", "dev", "test", "stage", "prod", "beta", "uat",
+                        "admin", "app", "login", "auth", "portal", "db", "mail",
+                        "gw", "k8s", "metrics", "grafana", "sso"
+                    ]
+                    common_file = tempfile.NamedTemporaryFile(mode='w+', delete=False, suffix='_common.txt')
+                    common_file.write('\n'.join(common_words))
+                    common_payload_path = common_file.name
+                    common_file.close()
+
             cmd = [
                 self.alterx_path,
                 "-l", input_file_path,
@@ -141,7 +144,7 @@ class PermutationTool(Tool):
             for target in domains:
                 self.results[target] = {"error": str(e)}
         finally:
-            if os.path.exists(input_file_path):
+            if input_file_path and os.path.exists(input_file_path):
                 os.remove(input_file_path)
             if patterns_file_path and os.path.exists(patterns_file_path):
                 os.remove(patterns_file_path)

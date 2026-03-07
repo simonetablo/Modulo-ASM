@@ -3,6 +3,7 @@ import subprocess
 import os
 import shutil
 import sys
+from urllib.parse import urlparse
 from typing import List, Dict, Any
 from .base_tool import Tool
 
@@ -167,11 +168,27 @@ class NucleiTool(Tool):
                         if matched_url in self.results:
                             target_key = matched_url
                         else:
-                            # 2. Prova match inclusivo o di fallback estraendo l'host
-                            for original_target in targets:
-                                if matched_url and (matched_url in original_target or original_target in matched_url):
-                                    target_key = original_target
-                                    break
+                            # 2. Prova match host-based accurato
+                            try:
+                                parsed_match = urlparse(matched_url if "://" in matched_url else "http://" + matched_url)
+                                match_host = parsed_match.netloc or parsed_match.path
+                                
+                                for original_target in targets:
+                                    parsed_orig = urlparse(original_target if "://" in original_target else "http://" + original_target)
+                                    orig_host = parsed_orig.netloc or parsed_orig.path
+                                    
+                                    if match_host == orig_host:
+                                        target_key = original_target
+                                        break
+                                        
+                                # Se ancora non trovato, fallback su `in` solo come ultima spes (ma con rischio hijacking)
+                                if not target_key:
+                                    for original_target in targets:
+                                        if matched_url and (matched_url in original_target or original_target in matched_url):
+                                            target_key = original_target
+                                            break
+                            except Exception:
+                                pass
                         
                         if target_key:
                             # Estrae solo i dati salienti e riduce lo spazio del report finale dell'ASM

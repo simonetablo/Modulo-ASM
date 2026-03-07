@@ -131,7 +131,8 @@ class HttpxTool(Tool):
                 check=False
             )
             
-            if process.returncode != 0:
+            # Trova errori critici
+            if process.returncode != 0 and not process.stdout.strip():
                 print(f"Errore esecuzione httpx: {process.stderr}", file=sys.stderr)
                 for target in domains:
                     if target not in self.results:  # Don't overwrite existing results

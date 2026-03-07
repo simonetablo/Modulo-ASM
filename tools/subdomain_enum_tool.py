@@ -82,28 +82,30 @@ class SubdomainEnumTool(Tool):
             if method == "resolve":
                 # In modalità resolve, 'domains' contiene i candidati da validare (es. output di alterx)
                 # Puredns resolve accetta un file con i domini da risolvere
-                with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='_candidates.txt') as f:
-                    f.write("\n".join(domains))
-                    candidates_file = f.name
-                
-                print(f"Avvio validazione DNS per {len(domains)} candidati...", file=sys.stderr)
-                resolved = self._run_puredns_resolve(candidates_file, resolvers_file)
-                
-                # Salviamo i risultati. Puredns resolve restituisce quelli validi.
-                # In questo caso non c'è un "target" padre chiaro se la lista è mista,
-                # ma se stiamo validando permutazioni di X, potremmo volerli raggruppare.
-                # Per semplicità, e coerenza, restituiamo i domini validati in una struttura
-                # che il chiamante possa usare.
-                # Se il chiamante ha passato [sub1.test.com, sub2.test.com],
-                # noi restituiamo quali di questi sono attivi.
-                
-                self.results["resolved_domains"] = {
-                    "count": len(resolved),
-                    "domains": resolved
-                }
-                
-                if os.path.exists(candidates_file):
-                    os.remove(candidates_file)
+                candidates_file = None
+                try:
+                    with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='_candidates.txt') as f:
+                        f.write("\n".join(domains))
+                        candidates_file = f.name
+                    
+                    print(f"Avvio validazione DNS per {len(domains)} candidati...", file=sys.stderr)
+                    resolved = self._run_puredns_resolve(candidates_file, resolvers_file)
+                    
+                    # Salviamo i risultati. Puredns resolve restituisce quelli validi.
+                    # In questo caso non c'è un "target" padre chiaro se la lista è mista,
+                    # ma se stiamo validando permutazioni di X, potremmo volerli raggruppare.
+                    # Per semplicità, e coerenza, restituiamo i domini validati in una struttura
+                    # che il chiamante possa usare.
+                    # Se il chiamante ha passato [sub1.test.com, sub2.test.com],
+                    # noi restituiamo quali di questi sono attivi.
+                    
+                    self.results["resolved_domains"] = {
+                        "count": len(resolved),
+                        "domains": resolved
+                    }
+                finally:
+                    if candidates_file and os.path.exists(candidates_file):
+                        os.remove(candidates_file)
 
             else: # Default: bruteforce
                 scan_type = params.get("scan_type", "fast").lower()
@@ -150,12 +152,15 @@ class SubdomainEnumTool(Tool):
                             random_prefix = ''.join(random.choices(string.ascii_lowercase + string.digits, k=12))
                             wildcard_check_domain = f"{random_prefix}.{current_target}"
                             
-                            with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='_wildcard.txt') as f:
-                                f.write(wildcard_check_domain)
-                                wildcard_path = f.name
-                            wildcard_result = self._run_puredns_resolve(wildcard_path, resolvers_file)
-                            if os.path.exists(wildcard_path):
-                                os.remove(wildcard_path)
+                            wildcard_path = None
+                            try:
+                                with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='_wildcard.txt') as f:
+                                    f.write(wildcard_check_domain)
+                                    wildcard_path = f.name
+                                wildcard_result = self._run_puredns_resolve(wildcard_path, resolvers_file)
+                            finally:
+                                if wildcard_path and os.path.exists(wildcard_path):
+                                    os.remove(wildcard_path)
 
                             if wildcard_result:
                                 print(f"  [!] Rilevato Wildcard su {current_target}. Salto il bruteforce per questo ramo ({scan_type} mode).", file=sys.stderr)
@@ -230,14 +235,17 @@ class SubdomainEnumTool(Tool):
             return set()
             
         print(f"  [+] Generazione Smart: '{len(smart_candidates)}' micro-permutazioni dal target {current_target}...", file=sys.stderr)
-        with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='_smart.txt') as f:
-            f.write("\n".join(smart_candidates))
-            candidates_file = f.name
-        
-        smart_resolved = self._run_puredns_resolve(candidates_file, resolvers_file)
-        
-        if os.path.exists(candidates_file):
-            os.remove(candidates_file)
+        candidates_file = None
+        try:
+            with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='_smart.txt') as f:
+                f.write("\n".join(smart_candidates))
+                candidates_file = f.name
+            
+            smart_resolved = self._run_puredns_resolve(candidates_file, resolvers_file)
+            
+        finally:
+            if candidates_file and os.path.exists(candidates_file):
+                os.remove(candidates_file)
             
         if smart_resolved:
             print(f"  [+] Scoperte '{len(smart_resolved)}' nuove permutazioni on-the-fly!", file=sys.stderr)
