@@ -1,0 +1,5 @@
+{
+    "nmap_flags": "-sS -sV -sC -sU -p U:53,161,162,111,123,137,138,500,514,1434,T:1-65535 --host-timeout 30m",
+    "default_timing": "T4",
+    "polite_timing": "T2"
+}

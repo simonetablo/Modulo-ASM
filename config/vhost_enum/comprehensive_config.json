@@ -1,0 +1,20 @@
+{
+    "flags": [
+        "-ac",
+        "-mc",
+        "all",
+        "-t",
+        "100",
+        "-timeout",
+        "15"
+    ],
+    "routing_headers": [
+        "Host",
+        "X-Forwarded-Host",
+        "X-Host",
+        "Forwarded"
+    ],
+    "max_workers_resolve": 10,
+    "max_workers_scan": 3,
+    "process_timeout": 1200
+}

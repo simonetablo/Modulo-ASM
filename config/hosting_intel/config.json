@@ -1,0 +1,7 @@
+{
+    "dns_fallback_count": 2,
+    "dns_timeout": 2.0,
+    "max_workers": 50,
+    "cdncheck_timeout_per_ip": 1.0,
+    "cdncheck_timeout_buffer": 120
+}

@@ -1,0 +1,7 @@
+DESCRIZIONE PARAMETRI - HostingIntelTool (cdncheck + DNS)
+======================================================
+
+- dns_fallback_count: Numero di resolver DNS da utilizzare per la risoluzione massiva dei record A.
+- dns_timeout: Timeout in secondi per le query DNS individuali.
+- max_workers: Numero di thread concorrenti per l'identificazione di CDN e infrastruttura.
+- cdncheck_timeout_per_ip: Timeout di base per l'utility cdncheck per ogni IP scansionato.

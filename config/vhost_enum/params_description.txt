@@ -1,0 +1,8 @@
+DESCRIZIONE PARAMETRI - VhostEnumTool (ffuf)
+=========================================
+
+- flags: Argomenti di base per ffuf (es. -ac per auto-calibrazione, -mc per match codes).
+- routing_headers: Elenco degli header HTTP su cui effettuare il brute-force (es. Host, X-Forwarded-Host).
+- max_workers_resolve: Dimensione del pool di thread per la risoluzione DNS dei target.
+- max_workers_scan: Numero di scansioni ffuf eseguite contemporaneamente.
+- process_timeout: Tempo massimo in secondi per ogni singola sessione di ffuf.

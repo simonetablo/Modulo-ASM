@@ -11,15 +11,17 @@ class NucleiTool(Tool):
     """
     Implementazione del tool Nuclei (ProjectDiscovery).
     Esegue scansioni di fingerprinting avanzato e vulnerability scanning su risorse web (URL).
+    Parametri caricati da config/nuclei/<scan_type>_config.json.
     """
 
-    # Definizione dei profili di scansione. In ASM ci concentriamo ESCLUSIVAMENTE sul fingerprinting tecnologico.
-    # Disabilitati i template di vulnerabilità attiva (cve, sqli, rce) per evitare falsi positivi o blocchi.
-    SCAN_PROFILES = {
-        "fast": ["-tags", "tech", "-severity", "info", "-c", "50", "-bs", "50"],
-        "accurate": ["-tags", "tech", "-severity", "info", "-c", "25", "-bs", "25"],
-        "comprehensive": ["-tags", "tech", "-severity", "info", "-c", "100", "-bs", "100"],
-        "stealth": ["-tags", "tech", "-severity", "info", "-rl", "50", "-c", "2", "-timeout", "10"]
+    # Defaults hardcoded come ultimo fallback se nessun file config è presente
+    DEFAULT_CONFIG = {
+        "flags": ["-tags", "tech", "-severity", "info", "-c", "50", "-bs", "50"],
+        "excluded_tags": "cve,sqli,xss,rce,fuzz,dos,auth-bypass,takeover,lfi,ssrf,injection,misconfig",
+        "polite_rate_limit": 20,
+        "polite_timeout": 10,
+        "process_timeout_per_target": 15,
+        "process_timeout_buffer": 300
     }
 
     def __init__(self):
@@ -95,10 +97,11 @@ class NucleiTool(Tool):
 
     def _build_args(self, scan_type: str, timing: str, max_rate: int = None) -> List[str]:
         """
-        Costruisce il comando nuclei basato su scan_type, timing e max_rate.
+        Costruisce il comando nuclei basato su config file, timing e max_rate.
         """
-        if scan_type not in self.SCAN_PROFILES:
-            scan_type = 'fast'
+        # Carica configurazione da file con fallback chain
+        file_config = self.load_config("nuclei", scan_type)
+        self._config = {**self.DEFAULT_CONFIG, **file_config}
             
         cmd = [
             self.nuclei_path, 
@@ -106,18 +109,17 @@ class NucleiTool(Tool):
             "-silent", 
             "-nc", 
             "-ni",
-            # Bando totale e assoluto di qualsiasi template di DAST / VA / Exploiting
-            "-etags", "cve,sqli,xss,rce,fuzz,dos,auth-bypass,takeover,lfi,ssrf,injection,misconfig"
+            "-etags", self._config["excluded_tags"]
         ]
         
-        cmd.extend(self.SCAN_PROFILES[scan_type])
+        cmd.extend(self._config["flags"])
         
-        # Aggiunge timeout e rate limit per polite/stealth timing per ridurre il rischio di drop WAF
+        # Aggiunge timeout e rate limit per polite/stealth timing
         if max_rate:
             cmd.extend(["-rl", str(max_rate)])
             
         elif timing == 'polite':
-            cmd.extend(["-rl", "20", "-timeout", "10"])
+            cmd.extend(["-rl", str(self._config.get("polite_rate_limit", 20)), "-timeout", str(self._config.get("polite_timeout", 10))])
             
         return cmd
 
@@ -136,7 +138,8 @@ class NucleiTool(Tool):
                 input=input_data,
                 capture_output=True,
                 text=True,
-                check=False
+                check=False,
+                timeout=(len(targets) * self._config.get("process_timeout_per_target", 15)) + self._config.get("process_timeout_buffer", 300)
             )
             
             # Se ha stampato uno stderr ma ha restituito risultati ignoriamo perché Nuclei logga molto

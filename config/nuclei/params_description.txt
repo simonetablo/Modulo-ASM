@@ -1,0 +1,8 @@
+DESCRIZIONE PARAMETRI - NucleiTool (nuclei)
+=========================================
+
+- flags: Argomenti di base per il comando nuclei (es. -tags tech, -severity info).
+- concurrency: Numero di template eseguiti in parallelo.
+- bulk_size: Numero di host scansionati in parallelo per ogni template.
+- rate_limit: Limite massimo di richieste al secondo (req/sec).
+- timeout: Timeout in secondi per ogni singola richiesta.

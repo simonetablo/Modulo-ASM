@@ -1,0 +1,9 @@
+{
+    "depth": 1,
+    "rate": 50,
+    "timeout_minutes": 10,
+    "max_workers": 3,
+    "auto_form_fill": false,
+    "known_files": false,
+    "js_crawling": true
+}

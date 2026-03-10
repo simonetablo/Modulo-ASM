@@ -1,0 +1,7 @@
+DESCRIZIONE PARAMETRI - HttpxTool (httpx)
+=======================================
+
+- flags: Argomenti di base per il comando httpx (es. -title, -tech-detect, -status-code).
+- threads: Numero di thread concorrenti per le richieste HTTP.
+- timeout: Timeout in secondi per ogni singola richiesta HTTP.
+- retries: Numero di tentativi di riconnessione in caso di fallimento della richiesta.

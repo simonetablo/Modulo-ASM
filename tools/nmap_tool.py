@@ -8,13 +8,14 @@ class NmapTool(Tool):
     """
     Implementazione del tool Nmap che estende la classe base Tool.
     Utilizza la libreria `python-nmap` per eseguire scansioni di rete.
+    Parametri caricati da config/nmap/<scan_type>_config.json.
     """
 
-    SCAN_PROFILES = {
-        "fast": "-F",
-        "accurate": "--top-ports 1000 -sV --version-intensity 9 -sC",
-        "comprehensive": "-sS -sV -sC -sU -p U:53,161,162,111,123,137,138,500,514,1434,T:1-65535",
-        "stealth": "-sS"
+    # Defaults hardcoded come ultimo fallback se nessun file config è presente
+    DEFAULT_CONFIG = {
+        "nmap_flags": "-F --host-timeout 5m",
+        "default_timing": "T4",
+        "polite_timing": "T2"
     }
 
     def __init__(self):
@@ -91,20 +92,22 @@ class NmapTool(Tool):
     
     def _build_args(self, scan_type: str, timing: str, max_rate: int = None) -> str:
         """
-        Costruisce gli argomenti nmap basati su scan_type, timing e max_rate.
+        Costruisce gli argomenti nmap basati su config file, timing e max_rate.
         """
         scan_type = scan_type.lower()
-        if scan_type not in self.SCAN_PROFILES:
-            scan_type = 'fast'
-            
-        args = self.SCAN_PROFILES[scan_type]
+        
+        # Carica configurazione da file con fallback chain
+        file_config = self.load_config("nmap", scan_type)
+        config = {**self.DEFAULT_CONFIG, **file_config}
+        
+        args = config["nmap_flags"]
         
         # Aggiunge il parametro di timing se non esplicitamente definito nel profilo
         if "-T" not in args:
             if timing == 'polite':
-                args += ' -T2'  # Polite timing
+                args += f' -{config.get("polite_timing", "T2")}'
             else:
-                args += ' -T4'  # Aggressive timing (normal)
+                args += f' -{config.get("default_timing", "T4")}'
         
         # Aggiunge il parametro di rate limiting se specificato
         if max_rate:

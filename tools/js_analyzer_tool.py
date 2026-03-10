@@ -12,8 +12,17 @@ from .base_tool import Tool
 class JsAnalyzerTool(Tool):
     """
     Esegue analisi statica dell'AST Javascript usando jsluice (BishopFox).
-    Estrae endpoint segreti, API paths e URL cablati nel file.
+    Parametri caricati da config/js_analyzer/config.json.
     """
+
+    # Defaults hardcoded come ultimo fallback se nessun file config è presente
+    DEFAULT_CONFIG = {
+        "jsluice_concurrency": 5,
+        "batch_size": 50,
+        "max_workers": 5,
+        "process_timeout_per_batch_item": 3,
+        "process_timeout_buffer": 30
+    }
 
     def __init__(self):
         super().__init__()
@@ -40,16 +49,20 @@ class JsAnalyzerTool(Tool):
         if not js_urls:
             return
 
+        # Carica configurazione da file
+        file_config = self.load_config("js_analyzer")
+        config = {**self.DEFAULT_CONFIG, **file_config}
+
         def _process_js_batch(js_urls_batch: List[str]):
             cmd = [
                 self.jsluice_path,
                 "urls",
                 "-u",
-                "-c", "5" # Concorrenza interna bassa per essere WAF-friendly e non saturare i socket
+                "-c", str(config.get("jsluice_concurrency", 5))
             ] + js_urls_batch
             
             try:
-                 process = subprocess.run(cmd, capture_output=True, text=True, check=False, timeout=(len(js_urls_batch) // 10 * 30) + 30)
+                 process = subprocess.run(cmd, capture_output=True, text=True, check=False, timeout=(len(js_urls_batch) * config.get("process_timeout_per_batch_item", 3)) + config.get("process_timeout_buffer", 30))
                  
                  if process.stdout:
                      # Jsluice produce JSONL di default
@@ -91,10 +104,10 @@ class JsAnalyzerTool(Tool):
 
 
         # batch di 50 per evitare ban rate-limiting e sovraccarico RAM dal parsing AST di JS enormi
-        batch_size = 50
+        batch_size = config.get("batch_size", 50)
         batches = [js_urls[i:i + batch_size] for i in range(0, len(js_urls), batch_size)]
         
-        max_workers = min(5, len(batches))
+        max_workers = min(config.get("max_workers", 5), len(batches))
         print(f"Avvio Javascript Static Analysis (jsluice) su {len(js_urls)} file ({len(batches)} batch da max {batch_size})...", file=sys.stderr)
         with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = [executor.submit(_process_js_batch, batch) for batch in batches]

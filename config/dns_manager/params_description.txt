@@ -1,0 +1,7 @@
+DESCRIZIONE PARAMETRI - DnsManagerTool
+====================================
+
+- max_resolvers: Numero massimo di resolver DNS da importare dalle liste pubbliche.
+- freshness_hours: Numero di ore dopo le quali la lista locale dei resolver viene aggiornata tramite download.
+- doh_max_retries: Numero massimo di tentativi in caso di fallimento delle query DNS-over-HTTPS.
+- validation_max_workers: Numero di thread per la validazione della salute e velocità dei resolver.

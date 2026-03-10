@@ -1,0 +1,6 @@
+{
+    "max_resolvers": 50,
+    "freshness_hours": 24,
+    "doh_max_retries": 3,
+    "validation_max_workers": 50
+}

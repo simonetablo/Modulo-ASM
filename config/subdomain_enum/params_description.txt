@@ -1,0 +1,8 @@
+DESCRIZIONE PARAMETRI - SubdomainEnumTool (puredns)
+===================================================
+
+- wordlist: Percorso del file contenente la lista di sottodomini per il bruteforce.
+- rate_limit: Numero massimo di query DNS al secondo (passato a puredns tramite -l).
+- max_depth: Profondità massima per il bruteforce ricorsivo (es. sub.sub.target.com).
+- smart: Valore booleano (true/false) per abilitare le micro-permutazioni on-the-fly.
+- process_timeout: Tempo massimo di esecuzione in secondi per ogni chiamata a puredns.

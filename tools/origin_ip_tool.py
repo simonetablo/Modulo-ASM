@@ -22,19 +22,20 @@ class OriginIpTool(Tool):
     """
     Tool per identificare e validare potenziali Origin IPs (IP reali dei server)
     dietro CDN o WAF (Cloudflare, Akamai, ecc.).
-    
-    Analizza i domini scoperti e le informazioni infrastrutturali:
-    Se il dominio principale è dietro CDN, ma alcuni sottodomini risolvono 
-    su IP che NON appartengono a CDN, quegli IP vengono classificati come 
-    potenziali Origin IPs.
-    
-    Introduce una validazione a tre livelli (SSL, Headers, Body Similarity) 
-    per scartare i falsi positivi (es. IP riassegnati, vecchie macchine spente).
+    Parametri caricati da config/origin_ip/config.json.
     """
 
-    # Timeout molto aggressivi per scartare subito gli IP "buchi neri"
-    CONNECTION_TIMEOUT = 3.0
-    READ_TIMEOUT = 5.0
+    # Defaults hardcoded come ultimo fallback se nessun file config è presente
+    DEFAULT_CONFIG = {
+        "connection_timeout": 3.0,
+        "read_timeout": 5.0,
+        "similarity_threshold": 0.85,
+        "length_ratio_threshold": 0.85,
+        "max_body_compare_length": 50000,
+        "max_workers": 10
+    }
+
+
     
     # Header di default per bypassare blocchi WAF base
     DEFAULT_HEADERS = {
@@ -54,6 +55,9 @@ class OriginIpTool(Tool):
         super().__init__()
         self.results = {}
         self.dns_resolvers = dns_resolvers or ['1.1.1.1', '8.8.8.8']
+        # Carica configurazione
+        file_config = self.load_config("origin_ip")
+        self._config = {**self.DEFAULT_CONFIG, **file_config}
 
     def run(self, domains: List[str], params: Dict[str, Any], infra_results: Dict[str, Any] = None, grouped_domains: Dict[str, List[str]] = None) -> None:
         """
@@ -125,12 +129,35 @@ class OriginIpTool(Tool):
 
     def _validate_origin_ips(self, base_domain: str, candidates: List[str]) -> List[str]:
         """
-        Esegue la validazione a cascata (SSL -> HTTP Headers -> Similarity) 
-        usando un ThreadPool per non bloccare l'esecuzione.
+        Esegue la validazione a cascata (Fase Fast Probe -> SSL -> HTTP Headers -> Similarity) 
+        usando HttpxTool per la velocità iniziale e ThreadPool per la profondità.
         """
+        from .httpx_tool import HttpxTool
         validated = []
         
-        # 0. Fase di Calibrazione: Raccogliamo le firme (signature) dal dominio ufficiale (che passa per la CDN)
+        # 1. Fase di Fast Probe: Eliminiamo subito gli IP che non rispondono a nulla (Porta 80/443)
+        # Questo riduce drasticamente il tempo perso in timeout su requests
+        print(f"      [*] Probing veloce di {len(candidates)} candidati via Httpx...", file=sys.stderr)
+        probe_urls = []
+        for ip in candidates:
+            # Opt: Testiamo sia http che https per l'IP nudo
+            probe_urls.append(f"https://{ip}/")
+            probe_urls.append(f"http://{ip}/")
+            
+        validator = HttpxTool()
+        alive_probe_urls = set(validator.verify_urls(probe_urls))
+        # Estraiamo gli IP che hanno almeno un URL vivo
+        alive_ips = set()
+        for url in alive_probe_urls:
+            p = urlparse(url)
+            alive_ips.add(p.hostname)
+            
+        if not alive_ips:
+            return []
+            
+        print(f"      [*] {len(alive_ips)} IP rispondono al probe. Avvio validazione SSL/Similarity...", file=sys.stderr)
+
+        # 2. Fase di Calibrazione Baseline
         baseline_data = self._fetch_baseline(base_domain)
         if not baseline_data:
              print(f"      [!] Impossibile estrarre baseline dal target {base_domain}. Check SSL sarà l'unico stringente.", file=sys.stderr)
@@ -140,7 +167,7 @@ class OriginIpTool(Tool):
             if self._validate_ssl(ip, base_domain):
                 return ip, "ssl_match"
                 
-            # Se la baseline non c'è ed il cert ha fallito, non possiamo procedere oltre
+            # Se la baseline non c'è ed il cert ha fallito, non procediamo oltre
             if not baseline_data:
                  return None, None
                  
@@ -150,16 +177,16 @@ class OriginIpTool(Tool):
                 
             return None, None
 
-        with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
-             future_to_ip = {executor.submit(check_candidate, ip): ip for ip in candidates}
+        # Eseguiamo solo su alive_ips
+        with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(alive_ips), self._config.get("max_workers", 10))) as executor:
+             future_to_ip = {executor.submit(check_candidate, ip): ip for ip in alive_ips}
              for future in concurrent.futures.as_completed(future_to_ip):
                  ip = future_to_ip[future]
                  try:
                      result_ip, match_type = future.result()
                      if result_ip:
                          validated.append(result_ip)
-                 except Exception as exc:
-                     # Silently ignore general thread exceptions to keep ASM running
+                 except Exception:
                      pass
 
         return validated
@@ -175,7 +202,7 @@ class OriginIpTool(Tool):
             context.check_hostname = False
             context.verify_mode = ssl.CERT_NONE  # Ignoriamo chain issues (es. Let's Encrypt scaduti) 
             
-            with socket.create_connection((ip, 443), timeout=self.CONNECTION_TIMEOUT) as sock:
+            with socket.create_connection((ip, 443), timeout=self._config.get("connection_timeout", 3.0)) as sock:
                 with context.wrap_socket(sock, server_hostname=base_domain) as ssock:
                     der_cert = ssock.getpeercert(binary_form=True)
                     if not der_cert:
@@ -210,7 +237,7 @@ class OriginIpTool(Tool):
         target_url = f"https://{base_domain}"
         
         try:
-            resp = requests.get(target_url, headers=self.DEFAULT_HEADERS, timeout=self.READ_TIMEOUT, verify=False, allow_redirects=True)
+            resp = requests.get(target_url, headers=self.DEFAULT_HEADERS, timeout=self._config.get("read_timeout", 5.0), verify=False, allow_redirects=True)
             baseline['headers'] = {k.lower(): v for k, v in resp.headers.items()}
             baseline['cookies'] = list(resp.cookies.keys())
             baseline['body_length'] = len(resp.text)
@@ -222,7 +249,7 @@ class OriginIpTool(Tool):
             # Fallback a HTTP
             try:
                 target_url = f"http://{base_domain}"
-                resp = requests.get(target_url, headers=self.DEFAULT_HEADERS, timeout=self.READ_TIMEOUT, verify=False, allow_redirects=True)
+                resp = requests.get(target_url, headers=self.DEFAULT_HEADERS, timeout=self._config.get("read_timeout", 5.0), verify=False, allow_redirects=True)
                 baseline['headers'] = {k.lower(): v for k, v in resp.headers.items()}
                 baseline['cookies'] = list(resp.cookies.keys())
                 baseline['body_length'] = len(resp.text)
@@ -259,7 +286,7 @@ class OriginIpTool(Tool):
                     req_headers["Host"] = base_domain # requests userà internamente l'host per l'SNI (anche bypassando l'IP) nella nuova versione di urllib3 se opportunamente tunata, ma noi l'abbiamo già controllato tramite _validate_ssl
                 
                 try:
-                    resp = requests.get(url, headers=req_headers, timeout=self.READ_TIMEOUT, verify=False, allow_redirects=False)
+                    resp = requests.get(url, headers=req_headers, timeout=self._config.get("read_timeout", 5.0), verify=False, allow_redirects=False)
                     resp_headers = {k.lower(): v for k, v in resp.headers.items()}
                     resp_body = resp.text
                     resp_title = self._extract_title(resp_body)
@@ -291,11 +318,11 @@ class OriginIpTool(Tool):
                     if baseline_body and resp_body:
                         # Ratio semplice sulle lunghezze prima di fare un diff pesante
                         len_ratio = min(len(baseline_body), len(resp_body)) / max(len(baseline_body), len(resp_body))
-                        if len_ratio > 0.85: 
+                        if len_ratio > self._config.get("length_ratio_threshold", 0.85): 
                             # Se la lunghezza differisce di max 15%, calcoliamo la vera similarità bloccante (ratio() = >0.85 approx match)
                             # Questo step è pesante per body string > 1 MB, ma la limitiamo testando l'header length
-                            similarity = difflib.SequenceMatcher(None, baseline_body[:50000], resp_body[:50000]).ratio()
-                            if similarity > 0.85:
+                            similarity = difflib.SequenceMatcher(None, baseline_body[:self._config.get("max_body_compare_length", 50000)], resp_body[:self._config.get("max_body_compare_length", 50000)]).ratio()
+                            if similarity > self._config.get("similarity_threshold", 0.85):
                                 return True
                                 
                 except requests.exceptions.Timeout:

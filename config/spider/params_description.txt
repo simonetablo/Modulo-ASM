@@ -1,0 +1,8 @@
+DESCRIZIONE PARAMETRI - SpiderTool (katana)
+=========================================
+
+- depth: Profondità massima di navigazione (crawling) all'interno del sito.
+- rate_limit: Limite massimo di richieste al secondo.
+- timeout: Durata massima della scansione in minuti per ogni target.
+- concurrency: Livello di concorrenza per le richieste effettuate da Katana.
+- parallelism: Numero di target scansionati contemporaneamente (thread pool).

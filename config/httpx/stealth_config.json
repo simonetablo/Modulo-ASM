@@ -1,0 +1,15 @@
+{
+    "flags": [
+        "-title",
+        "-status-code",
+        "-tech-detect",
+        "-hash",
+        "sha256"
+    ],
+    "polite_timeout": 10,
+    "verify_threads": 150,
+    "verify_timeout": 5,
+    "verify_match_codes": "100-403,405-599",
+    "process_timeout_per_url": 10,
+    "process_timeout_buffer": 300
+}

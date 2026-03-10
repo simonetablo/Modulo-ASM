@@ -1,0 +1,11 @@
+DESCRIZIONE PARAMETRI - ContentDiscoveryTool (ffuf)
+=================================================
+
+- threads: Numero di thread concorrenti utilizzati da ffuf per il fuzzing.
+- rate: Limite di richieste al secondo (impostare 0 per nessun limite).
+- timeout_minutes: Durata massima in minuti per ogni singola sessione di ffuf.
+- recursion_depth: Profondità della ricorsione sulle directory scoperte.
+- match_codes: Lista di codici di stato HTTP da considerare come risultati validi (separati da virgola).
+- max_workers: Numero massimo di target scansionati in parallelo.
+- cdn_max_threads: Limite di thread applicato automaticamente se viene rilevata una CDN (per profili accurate/comprehensive).
+- cdn_forced_rate: Rate limit forzato in presenza di CDN.

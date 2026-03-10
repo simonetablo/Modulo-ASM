@@ -1,0 +1,6 @@
+DESCRIZIONE PARAMETRI - IPRotationTool (background monitor)
+==========================================================
+
+- enabled: Valore booleano per attivare o disattivare il monitoraggio in background dei cambiamenti IP (DNS rotation).
+- interval_seconds: Secondi di attesa tra un controllo DNS e il successivo.
+- duration_seconds: Durata minima totale del monitoraggio per sessione.

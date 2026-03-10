@@ -1,0 +1,5 @@
+{
+    "enabled": true,
+    "interval_seconds": 30,
+    "duration_seconds": 120
+}

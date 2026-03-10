@@ -9,13 +9,18 @@ class HttpxTool(Tool):
     """
     Implementazione del tool HTTPX (ProjectDiscovery) che estende la classe base Tool.
     Esegue scansioni web su porte HTTP/HTTPS scoperte.
+    Parametri caricati da config/httpx/<scan_type>_config.json.
     """
 
-    SCAN_PROFILES = {
-        "fast": ["-title", "-status-code", "-tech-detect", "-favicon", "-hash", "sha256"],
-        "accurate": ["-title", "-status-code", "-tech-detect", "-jarm", "-favicon", "-hash", "sha256"],
-        "comprehensive": ["-title", "-status-code", "-tech-detect", "-follow-redirects", "-jarm", "-favicon", "-hash", "sha256", "-method", "-cname", "-asn"],
-        "stealth": ["-title", "-status-code", "-tech-detect", "-hash", "sha256"],
+    # Defaults hardcoded come ultimo fallback se nessun file config è presente
+    DEFAULT_CONFIG = {
+        "flags": ["-title", "-status-code", "-tech-detect", "-favicon", "-hash", "sha256"],
+        "polite_timeout": 10,
+        "verify_threads": 150,
+        "verify_timeout": 5,
+        "verify_match_codes": "100-403,405-599",
+        "process_timeout_per_url": 10,
+        "process_timeout_buffer": 300
     }
 
     def __init__(self):
@@ -86,17 +91,19 @@ class HttpxTool(Tool):
     
     def _build_args(self, params: Dict[str, Any], timing: str, max_rate: int = None) -> List[str]:
         """
-        Costruisce il comando httpx basato su scan_type, timing e max_rate.
+        Costruisce il comando httpx basato su config file, timing e max_rate.
         """
         scan_type = params.get('scan_type', 'fast').lower()
-        if scan_type not in self.SCAN_PROFILES:
-            scan_type = 'fast'
+        
+        # Carica configurazione da file con fallback chain
+        file_config = self.load_config("httpx", scan_type)
+        self._config = {**self.DEFAULT_CONFIG, **file_config}
             
         # Argomenti base
         cmd = [self.httpx_path, "-json", "-tls-grab"]
         
-        # Estende con i flag del profilo selezionato
-        cmd.extend(self.SCAN_PROFILES[scan_type])
+        # Estende con i flag dal config
+        cmd.extend(self._config["flags"])
         
         # Aggiunge -random-agent per stealth mode o polite timing (per evitare detection/blocking)
         if scan_type == 'stealth' or timing == 'polite':
@@ -104,7 +111,7 @@ class HttpxTool(Tool):
         
         # Aggiunge timeout per polite timing
         if timing == 'polite':
-            cmd.extend(["-timeout", "10"])
+            cmd.extend(["-timeout", str(self._config.get("polite_timeout", 10))])
         
         # Aggiunge rate limiting
         if max_rate:
@@ -128,7 +135,8 @@ class HttpxTool(Tool):
                 input=input_data,
                 capture_output=True,
                 text=True,
-                check=False
+                check=False,
+                timeout=(len(domains) * self._config.get("process_timeout_per_url", 10)) + self._config.get("process_timeout_buffer", 300)
             )
             
             # Trova errori critici
@@ -161,6 +169,63 @@ class HttpxTool(Tool):
             print(f"Eccezione durante esecuzione httpx: {str(e)}", file=sys.stderr)
             for target in domains:
                 self.results[target] = {"error": str(e)}
+
+    def verify_urls(self, urls: List[str]) -> List[str]:
+        """
+        Valida una lista di URL controllando se sono vivi (status 2xx/3xx).
+        Usa un profilo super-veloce di httpx.
+        
+        Args:
+            urls (List[str]): Lista di URL da verificare.
+            
+        Returns:
+            List[str]: Lista di URL che hanno risposto positivamente.
+        """
+        if not self.httpx_path or not urls:
+            return []
+
+        # Carica config per i parametri di verify
+        config = self.load_config("httpx")
+        if not config:
+            config = self.DEFAULT_CONFIG
+        
+        verify_threads = str(config.get("verify_threads", 150))
+        verify_timeout = str(config.get("verify_timeout", 5))
+        verify_match_codes = config.get("verify_match_codes", "100-403,405-599")
+        
+        cmd = [
+            self.httpx_path,
+            "-silent",
+            "-nc",
+            "-t", verify_threads, 
+            "-timeout", verify_timeout,
+            "-mc", verify_match_codes,
+            "-follow-redirects"
+        ]
+
+        verified = []
+        input_data = "\n".join(urls)
+
+        try:
+            # Eseguiamo httpx in modo che restituisca solo le URL che matchano i codici
+            process = subprocess.run(
+                cmd,
+                input=input_data,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=(len(urls) // 10) + 60
+            )
+
+            if process.stdout:
+                # httpx restituisce una lista di URL (una per riga)
+                for line in process.stdout.strip().split('\n'):
+                    if line.strip():
+                        verified.append(line.strip())
+        except Exception as e:
+            print(f"Errore durante verify_urls: {e}", file=sys.stderr)
+
+        return list(set(verified))
 
     def get_results(self) -> str:
         """

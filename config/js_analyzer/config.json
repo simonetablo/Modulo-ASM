@@ -1,0 +1,7 @@
+{
+    "jsluice_concurrency": 5,
+    "batch_size": 50,
+    "max_workers": 5,
+    "process_timeout_per_batch_item": 3,
+    "process_timeout_buffer": 30
+}

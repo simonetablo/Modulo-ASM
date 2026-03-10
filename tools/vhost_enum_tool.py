@@ -23,19 +23,13 @@ class VhostEnumTool(Tool):
     dalla risposta "default" del server (auto-calibration di ffuf con -ac).
     """
 
-    SCAN_PROFILES = {
-        "fast": {
-            "flags": ["-ac", "-mc", "all", "-t", "40", "-timeout", "5"]
-        },
-        "accurate": {
-            "flags": ["-ac", "-mc", "all", "-t", "80", "-timeout", "10"]
-        },
-        "comprehensive": {
-            "flags": ["-ac", "-mc", "all", "-t", "100", "-timeout", "15"]
-        },
-        "stealth": {
-            "flags": ["-ac", "-mc", "all", "-t", "5", "-timeout", "10", "-p", "0.5-1.5"]
-        }
+    # Defaults hardcoded come ultimo fallback se nessun file config è presente
+    DEFAULT_CONFIG = {
+        "flags": ["-ac", "-mc", "all", "-t", "40", "-timeout", "5"],
+        "routing_headers": ["Host"],
+        "max_workers_resolve": 10,
+        "max_workers_scan": 3,
+        "process_timeout": 1200
     }
 
     # Format string per gli headers di routing usati per il bypass/smuggling dei vhost.
@@ -78,7 +72,12 @@ class VhostEnumTool(Tool):
         if not domains:
             return
 
-        wordlist = params.get("vhost_wordlist") or params.get("wordlist") or "wordlists/vhosts.txt"
+        scan_type = params.get('scan_type', 'fast').lower()
+        # Carica configurazione da file con fallback chain
+        file_config = self.load_config("vhost_enum", scan_type)
+        self._config = {**self.DEFAULT_CONFIG, **file_config}
+
+        wordlist = params.get("vhost_wordlist") or params.get("wordlist") or self._config.get("wordlist") or "wordlists/vhosts.txt"
         
         if not os.path.exists(wordlist):
             print(f"ATTENZIONE: Wordlist vhost '{wordlist}' non trovata.", file=sys.stderr)
@@ -108,7 +107,7 @@ class VhostEnumTool(Tool):
                         base_domain = domain
                     else:
                         extracted = tldextract.extract(domain)
-                        base_domain = extracted.registered_domain if extracted.registered_domain else domain
+                        base_domain = extracted.top_domain_under_public_suffix if extracted.top_domain_under_public_suffix else domain
                 
                 target_ips = self._get_target_ips(domain, base_domain, origin_results, domain_ip_map)
                 return target, domain, port, base_domain, tuple(sorted(target_ips))
@@ -169,20 +168,19 @@ class VhostEnumTool(Tool):
 
     def _build_args(self, params: Dict[str, Any], timing: str, max_rate: int = None) -> List[str]:
         """
-        Costruisce gli argomenti ffuf basati su scan_type, timing e max_rate.
-        Restituisce la lista di argomenti base (senza target-specific args).
+        Costruisce gli argomenti ffuf basati su config file, timing e max_rate.
         """
         scan_type = params.get('scan_type', 'fast').lower()
-        if scan_type not in self.SCAN_PROFILES:
-            scan_type = 'fast'
 
-        profile = self.SCAN_PROFILES[scan_type]
+        # Carica configurazione da file con fallback chain
+        file_config = self.load_config("vhost_enum", scan_type)
+        self._config = {**self.DEFAULT_CONFIG, **file_config}
 
         # Argomenti base: output JSON, silenzioso
         cmd = [self.ffuf_path, "-json", "-s"]
 
-        # Flag dal profilo
-        cmd.extend(profile["flags"])
+        # Flag dal config
+        cmd.extend(self._config["flags"])
 
         # Rate limiting
         if max_rate:
@@ -227,16 +225,12 @@ class VhostEnumTool(Tool):
         
         representative_domain = targets_info[0][1]
         
-        # Filtro Header: Ottimizzazione per scansioni fast/accurate
-        if scan_type in ("fast", "accurate"):
-            routing_headers = [
-                ("Host", "FUZZ.{domain}".format(domain=base_domain))
-            ]
-        else:
-            routing_headers = [
-                (header_name, header_format.format(domain=base_domain))
-                for header_name, header_format in self.ROUTING_HEADERS_FORMATS
-            ]
+        # Filtro Header: usa routing_headers dal config
+        config_headers = self._config.get("routing_headers", ["Host"])
+        routing_headers = []
+        for header_name, header_format in self.ROUTING_HEADERS_FORMATS:
+            if header_name in config_headers:
+                routing_headers.append((header_name, header_format.format(domain=base_domain)))
         
         for target_ip in target_ips:
             # Opt: Format IPv6 address safely if present
@@ -268,7 +262,7 @@ class VhostEnumTool(Tool):
 
                 try:
                     process = subprocess.run(
-                        cmd, capture_output=True, text=True, check=False, timeout=120
+                        cmd, capture_output=True, text=True, check=False, timeout=self._config.get("process_timeout", 1200)
                     )
 
                     if process.returncode != 0 and not process.stdout:

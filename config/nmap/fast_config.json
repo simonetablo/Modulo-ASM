@@ -1,0 +1,5 @@
+{
+    "nmap_flags": "-F --host-timeout 5m",
+    "default_timing": "T4",
+    "polite_timing": "T2"
+}

@@ -1,0 +1,6 @@
+DESCRIZIONE PARAMETRI - NmapTool (nmap)
+=======================================
+
+- nmap_flags: Argomenti e flag passati direttamente al comando nmap (es. -F, -sV, -sC).
+- default_timing: Template di timing nmap (da T0 a T5) usato per scansioni standard.
+- polite_timing: Template di timing nmap usato quando viene richiesta esplicitamente una scansione "polite" (più lenta e discreta).

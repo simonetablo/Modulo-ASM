@@ -46,12 +46,16 @@ class ContentDiscoveryTool(Tool):
         "node.js": "wordlists/tech/nodejs.txt"
     }
 
-    # Profili FFUF - Bilanciano aggressività, velocità e rate limiting
-    SCAN_PROFILES = {
-        "fast": {"threads": 50, "rate": 0, "timeout": 5, "recursion_depth": 0},
-        "accurate": {"threads": 30, "rate": 50, "timeout": 8, "recursion_depth": 1},
-        "comprehensive": {"threads": 40, "rate": 0, "timeout": 10, "recursion_depth": 2},
-        "stealth": {"threads": 5, "rate": 10, "timeout": 15, "recursion_depth": 0}
+    # Profili FFUF - Parametri caricati da config/content_discovery/<scan_type>_config.json
+    DEFAULT_CONFIG = {
+        "threads": 50,
+        "rate": 0,
+        "timeout_minutes": 5,
+        "recursion_depth": 0,
+        "match_codes": "200,204,301,302,307,401,403,405",
+        "max_workers": 3,
+        "cdn_max_threads": 20,
+        "cdn_forced_rate": 30
     }
 
     def __init__(self, wordlist_path: str = None):
@@ -122,10 +126,10 @@ class ContentDiscoveryTool(Tool):
             base_domain = clean_url.split('/')[0].split(':')[0]
             
             scan_type = target_params.get(base_domain, {}).get("scan_type", params.get("scan_type", "fast")).lower()
-            if scan_type not in self.SCAN_PROFILES:
-                 scan_type = "fast"
                  
-            profile = self.SCAN_PROFILES[scan_type]
+            # Carica configurazione da file con fallback chain
+            file_config = self.load_config("content_discovery", scan_type)
+            profile = {**self.DEFAULT_CONFIG, **file_config}
             
             # 2. Analisi Contestuale Httpx (Ricerca Tecnologie e Wordlist)
             extensions = self._calculate_extensions(url, httpx_results)
@@ -158,10 +162,10 @@ class ContentDiscoveryTool(Tool):
             # Se è dietro CDN e stiamo scansionando aggressivo, abbassiamo un po' i thread per non essere bloccati
             if is_cdn and scan_type in ["accurate", "comprehensive"]:
                  print(f"[{url}] CDN rilevata, autolimitazione dei thread temporanea per evitare ban WAF.", file=sys.stderr)
-                 profile = profile.copy() # evitiamo di modificare il dict originale globale
-                 profile["threads"] = min(profile["threads"], 20)
+                 profile = profile.copy()
+                 profile["threads"] = min(profile["threads"], profile.get("cdn_max_threads", 20))
                  if profile["rate"] == 0:
-                      profile["rate"] = 30 # Forziamo un rate di request
+                      profile["rate"] = profile.get("cdn_forced_rate", 30)
 
             # Recupera l'eventuale wordlist dinamica (es. Spidering/JS) per questo dominio
             dyn_wl_file = None
@@ -186,7 +190,11 @@ class ContentDiscoveryTool(Tool):
                          os.remove(dyn_wl_file)
                      except: pass
 
-        max_workers = min(3, len(targets) if targets else 1)
+        # max_workers dal config globale
+        global_scan_type = params.get("scan_type", "fast").lower()
+        global_config = self.load_config("content_discovery", global_scan_type)
+        cfg_max_workers = global_config.get("max_workers", self.DEFAULT_CONFIG["max_workers"])
+        max_workers = min(cfg_max_workers, len(targets) if targets else 1)
         with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = [executor.submit(_process_target, url) for url in targets]
             done, _ = concurrent.futures.wait(futures)
@@ -305,7 +313,7 @@ class ContentDiscoveryTool(Tool):
         cmd = [
             self.ffuf_path,
             "-u", target_url,
-            "-s", "-json", "-ac", "-mc", "200,204,301,302,307,401,403,405"
+            "-s", "-json", "-ac", "-mc", profile.get("match_codes", "200,204,301,302,307,401,403,405")
         ]
         
         for wl in wordlists:
@@ -317,8 +325,7 @@ class ContentDiscoveryTool(Tool):
         cmd.extend(["-t", str(profile["threads"])])
         
         # Aggiunta di -maxtime nativo di Ffuf per non bruciare risorse su host impiccati
-        timeout_val = profile["timeout"] * 60 # Convertito da minuti (se era così inteso, o secondi lunghi)
-        # Assumendo profile["timeout"] fosse un valore generico numerico (5 = 5 minuti in questo tool)
+        timeout_val = profile.get("timeout_minutes", 5) * 60
         cmd.extend(["-maxtime", str(timeout_val)])
         
         if profile.get("rate", 0) > 0:

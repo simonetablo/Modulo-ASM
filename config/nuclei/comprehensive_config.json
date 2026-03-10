@@ -1,0 +1,17 @@
+{
+    "flags": [
+        "-tags",
+        "tech",
+        "-severity",
+        "info",
+        "-c",
+        "100",
+        "-bs",
+        "100"
+    ],
+    "excluded_tags": "cve,sqli,xss,rce,fuzz,dos,auth-bypass,takeover,lfi,ssrf,injection,misconfig",
+    "polite_rate_limit": 20,
+    "polite_timeout": 10,
+    "process_timeout_per_target": 15,
+    "process_timeout_buffer": 300
+}

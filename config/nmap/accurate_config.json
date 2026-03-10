@@ -1,0 +1,5 @@
+{
+    "nmap_flags": "--top-ports 2000 -sV --version-intensity 9 -sC --host-timeout 20m",
+    "default_timing": "T4",
+    "polite_timing": "T2"
+}

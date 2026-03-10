@@ -2,6 +2,9 @@ import json
 import argparse
 import sys
 import os
+import time
+import platform
+import subprocess as _subprocess
 from datetime import datetime
 from typing import List, Dict, Any, Tuple
 from urllib.parse import urlparse
@@ -23,6 +26,98 @@ from tools.js_analyzer_tool import JsAnalyzerTool
 from tools.content_discovery_tool import ContentDiscoveryTool
 from tools.dns_manager_tool import DnsManagerTool
 
+class TeeStream:
+    """Duplica la scrittura su uno stream originale e su un file di log."""
+    def __init__(self, original_stream, log_file):
+        self.original = original_stream
+        self.log_file = log_file
+
+    def write(self, data):
+        self.original.write(data)
+        try:
+            self.log_file.write(data)
+            self.log_file.flush()
+        except Exception:
+            pass
+
+    def flush(self):
+        self.original.flush()
+        try:
+            self.log_file.flush()
+        except Exception:
+            pass
+
+    def fileno(self):
+        return self.original.fileno()
+
+    def isatty(self):
+        return self.original.isatty()
+
+
+def setup_scan_directory(start_time: datetime, params: dict, args) -> str:
+    """
+    Crea la cartella di output per la singola run di scansione.
+    Struttura: <output_dir>/scan_<scan_type>_<max_depth>_<timestamp>/
+    Restituisce il path assoluto della cartella creata.
+    """
+    timestamp = start_time.strftime("%Y%m%d_%H%M%S")
+    scan_type = params.get("scan_type", "fast")
+    max_depth = params.get("max_depth", 5)
+    folder_name = f"scan_{scan_type}_{max_depth}_{timestamp}"
+
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    base_output_dir = args.output_dir if args.output_dir else os.path.join(script_dir, "results")
+    scan_dir = os.path.join(base_output_dir, folder_name)
+
+    try:
+        os.makedirs(scan_dir, exist_ok=True)
+    except Exception as e:
+        print(f"  [!] Errore nella creazione della directory {scan_dir}: {e}. Uso /tmp come fallback.", file=sys.stderr)
+        scan_dir = os.path.join("/tmp", folder_name)
+        os.makedirs(scan_dir, exist_ok=True)
+
+    return scan_dir
+
+
+def save_debug_info(scan_dir: str, args, params: dict, domains: list, start_time: datetime):
+    """Salva un file debug_info.txt con informazioni utili al troubleshooting."""
+    filepath = os.path.join(scan_dir, "debug_info.txt")
+    try:
+        lines = []
+        lines.append(f"=== ASM Scan Debug Info ===")
+        lines.append(f"Scan Start: {start_time.strftime('%Y-%m-%d %H:%M:%S')}")
+        lines.append(f"Hostname:   {platform.node()}")
+        lines.append(f"OS:         {platform.platform()}")
+        lines.append(f"Python:     {sys.version}")
+        lines.append(f"CWD:        {os.getcwd()}")
+        lines.append(f"Script:     {os.path.abspath(__file__)}")
+        lines.append(f"")
+        lines.append(f"--- Arguments (CLI) ---")
+        for k, v in vars(args).items():
+            lines.append(f"  {k}: {v}")
+        lines.append(f"")
+        lines.append(f"--- Parameters (merged) ---")
+        lines.append(json.dumps(params, indent=2))
+        lines.append(f"")
+        lines.append(f"--- Targets ({len(domains)}) ---")
+        for d in domains:
+            lines.append(f"  {d}")
+        lines.append(f"")
+        lines.append(f"--- External Tool Versions ---")
+        for tool_name in ["nmap", "puredns", "httpx", "nuclei", "katana", "ffuf", "alterx", "jsluice"]:
+            try:
+                result = _subprocess.run([tool_name, "--version"], capture_output=True, text=True, timeout=5)
+                version = (result.stdout.strip() or result.stderr.strip()).split('\n')[0]
+                lines.append(f"  {tool_name}: {version}")
+            except Exception:
+                lines.append(f"  {tool_name}: non trovato")
+        
+        with open(filepath, 'w') as f:
+            f.write('\n'.join(lines) + '\n')
+    except Exception as e:
+        print(f"  [!] Errore salvataggio debug_info: {e}", file=sys.stderr)
+
+
 def safe_load_json(data_str: str) -> dict:
     """Helper per il parsing sicuro dell'output dei tool in formato JSON."""
     try:
@@ -33,6 +128,9 @@ def safe_load_json(data_str: str) -> dict:
         print(f"ATTENZIONE: JSON parser error ({e}) on tool output. Fallback to {{}}.", file=sys.stderr)
         return {}
 
+# regex basica per ipv4, compilata a livello di modulo per ottimizzazione
+IPV4_PATTERN = re.compile(r"^(?:[0-9]{1,3}\.){3}[0-9]{1,3}$")
+
 def group_domains_by_base(domains: List[str]) -> Dict[str, List[str]]:
     """
     Raggruppa una lista di domini in base alla loro root (dominio base).
@@ -41,16 +139,13 @@ def group_domains_by_base(domains: List[str]) -> Dict[str, List[str]]:
     """
     groups = {}
     
-    # regex basica per ipv4
-    ipv4_pattern = re.compile(r"^(?:[0-9]{1,3}\.){3}[0-9]{1,3}$")
-    
     for d in domains:
-        if ipv4_pattern.match(d) or ":" in d:
+        if IPV4_PATTERN.match(d) or ":" in d:
             base = d
         else:
             extracted = tldextract.extract(d)
-            # registered_domain returns the root domain (e.g. google.co.uk)
-            base = extracted.registered_domain if extracted.registered_domain else d
+            # top_domain_under_public_suffix returns the root domain (e.g. google.co.uk)
+            base = extracted.top_domain_under_public_suffix if extracted.top_domain_under_public_suffix else d
             
         if base not in groups:
             groups[base] = []
@@ -315,13 +410,14 @@ def run_web_recon_phase(web_targets: set, params: dict, target_params: dict, arg
     # Nuclei sfrutta i target vivi per Vulnerability Scanning
     nuclei_results = {}
     if alive_web_targets:
-        if not args.skip_nuclei:
+        skip_nuclei = args.skip_nuclei or params.get('skip_nuclei') or params.get('skip-nuclei')
+        if not skip_nuclei:
             print(f"Avvio Advanced Fingerprinting con Nuclei su {len(alive_web_targets)} target web vivi...", file=sys.stderr)
             nuclei_tool = NucleiTool()
             nuclei_tool.run(alive_web_targets, params, target_params=target_params)
             nuclei_results = safe_load_json(nuclei_tool.get_results())
         else:
-            print("    [!] Salto Advanced Fingerprinting (Nuclei) come richiesto da flag.", file=sys.stderr)
+            print("    [!] Salto Advanced Fingerprinting (Nuclei) come richiesto da parametro/flag.", file=sys.stderr)
              
     return httpx_results, alive_web_targets, nuclei_results
 
@@ -342,24 +438,53 @@ def run_content_discovery_phase(alive_web_targets: List[str], httpx_results: dic
     if not alive_web_targets:
         return spider_results, js_results, c_discovery_results
 
-    # 1. Web Spidering (Katana) per endpoint e file JS passivi
+    # 1. Web Spidering (Katana)
     spider_tool = SpiderTool()
     spider_tool.run(alive_web_targets, params, target_params=target_params)
     spider_results = safe_load_json(spider_tool.get_results())
     
+    # --- OTTIMIZZAZIONE: Batch Validation ---
+    # Raccogliamo TUTTI gli URL da validare in un unico colpo per minimizzare l'overhead di httpx
+    urls_to_verify = []
+    for url, findings in spider_results.items():
+        if "error" not in findings:
+            urls_to_verify.extend(findings.get("endpoints", []))
+            urls_to_verify.extend(findings.get("js_files", []))
+
+    validator = HttpxTool()
+    print(f"Validazione batch di {len(urls_to_verify)} URL trovati dallo spider...", file=sys.stderr)
+    verified_urls = validator.verify_urls(urls_to_verify)
+    
+    # Helper per match robusto (ignora trailing slash, case, e porte default)
+    def normalize_url(u):
+        if not u: return ""
+        u = u.lower().rstrip('/')
+        if u.startswith('http://') and ':80' in u: u = u.replace(':80', '')
+        if u.startswith('https://') and ':443' in u: u = u.replace(':443', '')
+        return u
+
+    verified_pool_norm = {normalize_url(u) for u in verified_urls}
+    
     for url, findings in spider_results.items():
         domain_key = findings.get("base_domain") or get_hostname_from_url(url)
-            
         if "error" not in findings:
-             # Popolamento Wordlist dinamica (per FFUF) con query/paths dallo spider
-             if domain_key not in dynamic_wordlists:
-                  dynamic_wordlists[domain_key] = set()
-             if findings.get("paths_wordlist"):
-                  dynamic_wordlists[domain_key].update(findings["paths_wordlist"])
+             # Wordlist dinamica per FFUF (Sempre raw/completa)
+             if domain_key not in dynamic_wordlists: dynamic_wordlists[domain_key] = set()
+             dynamic_wordlists[domain_key].update(findings.get("paths_wordlist", []))
              
-             # Segnalibro dei JS files da analizzare
+             # Report: Filtriamo gli endpoint e i JS usando il pool validato
+             if findings.get("endpoints"):
+                  validated_eps = [ep for ep in findings["endpoints"] if normalize_url(ep) in verified_pool_norm]
+                  spider_results[url]["validated_endpoints"] = validated_eps
+                  spider_results[url]["validated_endpoints_count"] = len(validated_eps)
+
              if findings.get("js_files"):
-                  for js in findings["js_files"]:
+                  validated_js = [js for js in findings["js_files"] if normalize_url(js) in verified_pool_norm]
+                  spider_results[url]["js_files"] = validated_js
+                  spider_results[url]["js_files_count"] = len(validated_js)
+                  
+                  # Segnalibro per JS Analysis (usiamo la lista RAW)
+                  for js in findings.get("raw_js_files", []):
                        all_js_files_with_context.append({"url": js, "origin_domain": domain_key})
 
     # 2. JS Analysis (Jsluice)
@@ -369,41 +494,62 @@ def run_content_discovery_phase(alive_web_targets: List[str], httpx_results: dic
         js_analyzer.run(unique_js_urls, params)
         raw_js_results = safe_load_json(js_analyzer.get_results())
         
-        # Riappropriazione dei findings basata sull'origin domain
-        # Jsluice manderà il dom della CDN, ma noi lo mappiamo a chi lo ha richiesto
+        temp_js_endpoints = {}
         for context in all_js_files_with_context:
             js_url = context["url"]
             origin_domain = context["origin_domain"]
-            
             js_hosted_domain = get_hostname_from_url(js_url)
             if js_hosted_domain and js_hosted_domain in raw_js_results:
-                 extracted_paths = raw_js_results[js_hosted_domain]
-                 
-                 # Mappa ad origin root json
-                 if origin_domain not in js_results:
-                     js_results[origin_domain] = {"endpoints": set()}
-                 js_results[origin_domain]["endpoints"].update(extracted_paths)
-                 
-                 # Mappa ad FFUF list
-                 if origin_domain not in dynamic_wordlists:
-                      dynamic_wordlists[origin_domain] = set()
-                 dynamic_wordlists[origin_domain].update(extracted_paths)
+                 if origin_domain not in temp_js_endpoints: temp_js_endpoints[origin_domain] = set()
+                 temp_js_endpoints[origin_domain].update(raw_js_results[js_hosted_domain])
 
-    # Convert sets to list for FFUF serialization
+        # Batch validation per i risultati di JS Analysis
+        js_urls_to_verify = []
+        js_mapping = {} # URL -> (domain, original_path)
+        for dom, paths in temp_js_endpoints.items():
+            base_url = next((u for u in alive_web_targets if dom in u), f"https://{dom}")
+            for p in paths:
+                full_url = p if p.startswith('http') else f"{base_url.rstrip('/')}/{p.lstrip('/')}"
+                js_urls_to_verify.append(full_url)
+                js_mapping[full_url] = (dom, p)
+        
+        print(f"[Phase 5] Validazione batch di {len(js_urls_to_verify)} endpoint estratti dai JS...", file=sys.stderr)
+        verified_js_urls = validator.verify_urls(js_urls_to_verify)
+        verified_js_pool_norm = {normalize_url(u) for u in verified_js_urls}
+        
+        # Mappatura inversa robusta
+        norm_to_orig = {normalize_url(u): u for u in js_urls_to_verify}
+
+        for vurl_norm in verified_js_pool_norm:
+            if vurl_norm in norm_to_orig:
+                full_vurl = norm_to_orig[vurl_norm]
+                dom, original_p = js_mapping[full_vurl]
+                
+                if dom not in js_results: js_results[dom] = {"endpoints": set()}
+                p_url = urlparse(full_vurl)
+                res_path = p_url.path
+                if p_url.query: res_path += f"?{p_url.query}"
+                js_results[dom]["endpoints"].add(res_path)
+
+        # Finalize JS results counts and wordlists
+        for dom, data in js_results.items():
+            data["endpoints"] = list(data["endpoints"])
+            data["total_extracted_endpoints"] = len(data["endpoints"])
+            if dom not in dynamic_wordlists: dynamic_wordlists[dom] = set()
+            dynamic_wordlists[dom].update(data["endpoints"])
+
+    # Serializzazione FFUF
     for k in dynamic_wordlists:
          dynamic_wordlists[k] = list(dynamic_wordlists[k])
-         
-    for dom in js_results:
-        js_results[dom]["endpoints"] = list(js_results[dom]["endpoints"])
-        js_results[dom]["total_extracted_endpoints"] = len(js_results[dom]["endpoints"])
 
     # 3. Active Fuzzing con FFUF arricchito dai dati statici
-    if not args.skip_content_discovery:
+    skip_content_discovery = args.skip_content_discovery or params.get('skip_content_discovery') or params.get('skip-content-discovery')
+    if not skip_content_discovery:
         c_discovery_tool = ContentDiscoveryTool()
         c_discovery_tool.run(alive_web_targets, params, httpx_results=httpx_results, target_params=target_params, dynamic_wordlists=dynamic_wordlists)
         c_discovery_results = safe_load_json(c_discovery_tool.get_results())
     else:
-        print("    [!] Salto Content Discovery (FFUF) come richiesto da flag.", file=sys.stderr)
+        print("    [!] Salto Content Discovery (FFUF) come richiesto da parametro/flag.", file=sys.stderr)
 
     return spider_results, js_results, c_discovery_results
 
@@ -440,18 +586,41 @@ def main():
     composto agganciandosi alla standard out (stdout).
     """
     start_time = datetime.now()
+    phase_timings = {}
     
     # ----------------------------------------------------
     #  A. SETUP AMBIENTE E PARSING INGRESSO
     # ----------------------------------------------------
-    parser = argparse.ArgumentParser(description='ASM Module Backend - Modulo di scansione')
-    parser.add_argument('--input', type=str, help='Stringa JSON di input', required=False)
-    parser.add_argument('--file', type=str, help='Percorso al file JSON di input', required=False)
-    parser.add_argument('--use-doh', action='store_true', help='Utilizza DNS-over-HTTPS per validazione finale')
-    parser.add_argument('--dns-proxy', type=str, help='Percorso a un file txt contenente una lista di proxy (HTTP/SOCKS5) da usare per DoH')
-    parser.add_argument('--skip-content-discovery', action='store_true', help='Salta la fase attiva di Fuzzing (Content Discovery) mantenendo lo spidering passivo.')
-    parser.add_argument('--skip-nuclei', action='store_true', help='Salta la fase di Advanced Fingerprinting (Nuclei).')
-    parser.add_argument('--output-dir', type=str, help='Directory di destinazione per salvare il JSON finale (default: cartella corrente).', default='.')
+    parser = argparse.ArgumentParser(description='ASM - Modulo di recon attiva')
+    parser.add_argument('--input', type=str, help='JSON input string', required=False)
+    parser.add_argument('--file', type=str, help='Path to JSON input file', required=False)
+    parser.add_argument('--use-doh', action='store_true', help='Use DNS-over-HTTPS for final validation')
+    parser.add_argument('--dns-proxy', type=str, help='Path to a txt file containing a list of proxies (HTTP/SOCKS5) for DoH')
+    parser.add_argument('--output-dir', type=str, help='Output directory for scan results (default: results/).', default=None)
+    
+    # Flags for JSON parameter overrides
+    parser.add_argument('--scan-type', type=str, choices=['fast', 'accurate', 'comprehensive', 'stealth'], help='Scan aggressiveness profile')
+    parser.add_argument('--max-depth', type=int, help='Maximum subdomain enumeration depth')
+    parser.add_argument('--smart', action='store_true', default=None, help='Enable smart permutations')
+    parser.add_argument('--no-smart', action='store_false', dest='smart', help='Disable smart permutations')
+    parser.add_argument('--max-wildcards', type=int, help='AlterX wildcard variable limit')
+    parser.add_argument('--timing', type=str, choices=['normal', 'polite'], help='Nmap timing profile')
+    parser.add_argument('--max-rate', type=int, help='Packet rate limit (Nmap/Nuclei)')
+    parser.add_argument('--skip-content-discovery', action='store_true', default=None, help='Skip content discovery phase')
+    parser.add_argument('--no-skip-content-discovery', action='store_false', dest='skip_content_discovery', help='Force content discovery execution')
+    parser.add_argument('--skip-nuclei', action='store_true', default=None, help='Skip Nuclei scanning phase')
+    parser.add_argument('--no-skip-nuclei', action='store_false', dest='skip_nuclei', help='Force Nuclei execution')
+    parser.add_argument('--recursion-depth', type=int, help='FFUF recursion depth')
+    parser.add_argument('--subdomains-wordlist', type=str, help='Subdomain enumeration wordlist')
+    parser.add_argument('--permutations-wordlist', type=str, help='AlterX permutations wordlist')
+    parser.add_argument('--vhost-wordlist', type=str, help='VHost enumeration wordlist')
+    
+    # Rotation Monitor flags
+    parser.add_argument('--rotation-enabled', action='store_true', default=None, help='Enable IP rotation monitor')
+    parser.add_argument('--rotation-disabled', action='store_false', dest='rotation_enabled', help='Disable IP rotation monitor')
+    parser.add_argument('--rotation-interval', type=int, help='IP monitoring interval (sec)')
+    parser.add_argument('--rotation-duration', type=int, help='IP monitoring duration (sec)')
+    
     args = parser.parse_args()
 
     # Logica recupero ingresso
@@ -487,9 +656,54 @@ def main():
     params = data.get('params', {})
     passive_subdomains = data.get('passive_subdomains', {})
 
+    # Merging CLI arguments into params (CLI has precedence)
+    cli_params_map = {
+        'scan_type': args.scan_type,
+        'max_depth': args.max_depth,
+        'smart': args.smart,
+        'max_wildcards': args.max_wildcards,
+        'timing': args.timing,
+        'max_rate': args.max_rate,
+        'skip_content_discovery': args.skip_content_discovery,
+        'skip_nuclei': args.skip_nuclei,
+        'recursion_depth': args.recursion_depth,
+        'subdomains_wordlist': args.subdomains_wordlist,
+        'permutations_wordlist': args.permutations_wordlist,
+        'vhost_wordlist': args.vhost_wordlist
+    }
+    
+    for key, value in cli_params_map.items():
+        if value is not None:
+            params[key] = value
+            
+    # Maneggio speciale per rotation_monitor (oggetto annidato)
+    if args.rotation_enabled is not None or args.rotation_interval is not None or args.rotation_duration is not None:
+        if 'rotation_monitor' not in params:
+            params['rotation_monitor'] = {}
+        
+        if args.rotation_enabled is not None:
+            params['rotation_monitor']['enabled'] = args.rotation_enabled
+        if args.rotation_interval is not None:
+            params['rotation_monitor']['interval_seconds'] = args.rotation_interval
+        if args.rotation_duration is not None:
+            params['rotation_monitor']['duration_seconds'] = args.rotation_duration
+
     if not domains:
         print("Errore: Nessun dominio specificato nell'input.", file=sys.stderr)
         sys.exit(1)
+
+    # Creazione cartella di output per questa run
+    scan_dir = setup_scan_directory(start_time, params, args)
+    print(f"Scan directory: {scan_dir}", file=sys.stderr)
+
+    # Avvio cattura stderr su file
+    stderr_log_path = os.path.join(scan_dir, "stderr.log")
+    _stderr_log_file = open(stderr_log_path, 'w')
+    _original_stderr = sys.stderr
+    sys.stderr = TeeStream(_original_stderr, _stderr_log_file)
+
+    # Salva debug info (subito, prima che la scansione parta)
+    save_debug_info(scan_dir, args, params, domains, start_time)
 
     # Inizializzatore DNS Pool Manager
     dns_manager = DnsManagerTool()
@@ -500,15 +714,20 @@ def main():
     # ----------------------------------------------------
 
     # ==== FASE 1: Subdomain Enumeration ====
+    t1_start = time.time()
     domains, subdomain_results = run_subdomain_enumeration_phase(
         domains, passive_subdomains, params, args, dns_manager, python_dns_resolvers
     )
+    phase_timings["subdomain_enumeration"] = round(time.time() - t1_start, 2)
+    
     grouped_domains = group_domains_by_base(domains)
 
     # ==== FASE 2: Analisi Infrastruttura (Host Intel, WAF, Safety) ====
+    t2_start = time.time()
     safe_targets, skipped_targets, target_params, infra_results, origin_results, safety_results, domain_ip_map = run_infrastructure_analysis_phase(
         domains, params, grouped_domains, python_dns_resolvers
     )
+    phase_timings["infrastructure_analysis"] = round(time.time() - t2_start, 2)
 
     if skipped_targets:
         print(f"\nSkipped {len(skipped_targets)} target(s):", file=sys.stderr)
@@ -530,28 +749,36 @@ def main():
         print(json.dumps(final_results, indent=4))
         sys.exit(0)
 
-    print(f"\nProceeding with {len(safe_targets)} safe target(s)", file=sys.stderr)
+    print(f"Proceeding with {len(safe_targets)} safe target(s)", file=sys.stderr)
 
     # Iniezione background tool (IP Rotation) post cleaning WAF 
     # Analizza i cambiamenti live del dns su quei dati mentre i sub-tool fanno scansioni lorde in foreground
     iprotation_monitor = IPRotationTool(dns_resolvers=python_dns_resolvers)
-    iprotation_monitor.start_monitoring(safe_targets, interval=10, duration=30)
+    iprotation_monitor.run(safe_targets, params)
 
     # ==== FASE 3: Port Scanning (Network Recon) ====
+    t3_start = time.time()
     nmap_results, web_targets = run_port_scanning_phase(safe_targets, domain_ip_map, params)
+    phase_timings["port_scanning"] = round(time.time() - t3_start, 2)
 
     # ==== FASE 4: Live Web Recon & Fingerprinting (Nuclei/Httpx) ====
+    t4_start = time.time()
     httpx_results, alive_web_targets, nuclei_results = run_web_recon_phase(web_targets, params, target_params, args)
+    phase_timings["web_recon"] = round(time.time() - t4_start, 2)
 
     # ==== FASE 5: Content Discovery & App layer analysis (Katana/Jsluice/Ffuf) ====
+    t5_start = time.time()
     spider_results, js_results, c_discovery_results = run_content_discovery_phase(
         alive_web_targets, httpx_results, params, target_params, args
     )
+    phase_timings["content_discovery"] = round(time.time() - t5_start, 2)
 
     # ==== FASE 6: Virtual Hosts Enumeration (Nascosti su reverse proxies) ====
+    t6_start = time.time()
     vhost_results = run_final_enumeration_phase(
         web_targets, origin_results, grouped_domains, domain_ip_map, python_dns_resolvers, params, target_params
     )
+    phase_timings["vhost_enumeration"] = round(time.time() - t6_start, 2)
 
     # Fine delle scansioni di attacco => Interrompe il worker in Background di rotazione
     iprotation_monitor.stop()
@@ -632,6 +859,11 @@ def main():
     for url, findings in spider_results.items():
         domain_key = findings.get("base_domain") or get_hostname_from_url(url)
         if domain_key in final_results:
+            # --- Noise Reduction: Rimuovi liste grezze e wordlist chilometriche ---
+            findings.pop("paths_wordlist", None)
+            findings.pop("raw_js_files", None)
+            findings.pop("endpoints", None) # Restano i "validated_endpoints"
+            
             final_results[domain_key]["spidering"][url] = findings
 
     # Assegnazione Secret Detection ed API passiva
@@ -680,6 +912,7 @@ def main():
         "scan_start": start_time.strftime("%Y-%m-%d %H:%M:%S"),
         "scan_end": end_time.strftime("%Y-%m-%d %H:%M:%S"),
         "total_duration": duration_str,
+        "phase_timings": phase_timings,
         "scan_parameters": params,
         "arguments": vars(args),
         "targets": final_results
@@ -689,27 +922,31 @@ def main():
     json_output = json.dumps(global_results, indent=4)
     print(json_output)
     
-    # Salvataggio su file con timestamp
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    filename = f"asm_results_{timestamp}.json"
-    
-    # Assicurati che la directory esista
-    output_dir = args.output_dir
-    if output_dir != '.' and not os.path.exists(output_dir):
-        try:
-            os.makedirs(output_dir, exist_ok=True)
-        except Exception as e:
-            print(f"  [!] Errore nella creazione della directory {output_dir}: {e}. Salvo in cartella corrente.", file=sys.stderr)
-            output_dir = '.'
-            
-    filepath = os.path.join(output_dir, filename)
-    
+    # Salvataggio results.json nella cartella della run con nome conforme alla richiesta
+    filename = f"{os.path.basename(scan_dir)}.json"
+    results_filepath = os.path.join(scan_dir, filename)
     try:
-        with open(filepath, 'w') as f:
+        with open(results_filepath, 'w') as f:
             f.write(json_output)
-        print(f"\nRisultati salvati con successo in: {filepath}", file=sys.stderr)
+        print(f"\nRisultati salvati con successo in: {results_filepath}", file=sys.stderr)
     except Exception as e:
         print(f"\nErrore durante il salvataggio del file: {e}", file=sys.stderr)
+
+    # Salva stdout (il JSON) anche come file separato per completezza
+    stdout_filepath = os.path.join(scan_dir, "stdout.log")
+    try:
+        with open(stdout_filepath, 'w') as f:
+            f.write(json_output + '\n')
+    except Exception:
+        pass
+
+    # Chiudi il tee di stderr e ripristina lo stream originale
+    print(f"Scan completato. Tutti i file della run sono in: {scan_dir}", file=sys.stderr)
+    sys.stderr = _original_stderr
+    try:
+        _stderr_log_file.close()
+    except Exception:
+        pass
 
 # Esecuzione modulo in stand-alone
 if __name__ == "__main__":

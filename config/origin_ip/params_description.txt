@@ -1,0 +1,9 @@
+DESCRIZIONE PARAMETRI - OriginIpTool (SSL/HTTP validation)
+=======================================================
+
+- connection_timeout: Timeout in secondi per il probe iniziale della connessione TCP.
+- read_timeout: Timeout in secondi per la lettura della risposta HTTP.
+- similarity_threshold: Soglia di similarità (da 0.0 a 1.0) per il contenuto HTML del body (utilizza difflib).
+- length_ratio_threshold: Soglia di rapporto tra le lunghezze dei body per considerare i contenuti simili.
+- max_body_compare_length: Numero massimo di caratteri del body da confrontare (bilanciamento sicurezza/performance).
+- max_workers: Numero di thread paralleli per la validazione degli IP candidati.

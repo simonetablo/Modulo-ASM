@@ -41,20 +41,30 @@ class IPRotationTool(Tool):
         Args:
             domains: Lista di domini da monitorare
             params: Parametri di configurazione contenenti:
-                - rotation_monitor.enabled: bool (default: True) - abilita/disabilita il monitoraggio
-                - rotation_monitor.interval_seconds: int (default: 30) - intervallo tra le risoluzioni DNS
-                - rotation_monitor.duration_seconds: int (default: 120) - durata MINIMA del monitoraggio
-                  Il monitor continuerà oltre questa durata fino al completamento degli altri scan
+                - rotation_monitor.enabled: bool (default: True)
+                - rotation_monitor.interval_seconds: int (default: 30)
+                - rotation_monitor.duration_seconds: int (default: 120)
         """
+        # Carica configurazione da file con fallback chain
+        file_config = self.load_config("ip_rotation")
+        config = {
+            "enabled": True,
+            "interval_seconds": 30,
+            "duration_seconds": 120
+        }
+        config.update(file_config)
+        
+        # I parametri espliciti da params['rotation_monitor'] hanno priorità
         rotation_config = params.get('rotation_monitor', {})
+        config = self.merge_config(config, rotation_config)
         
         # Verifica se il monitoraggio è abilitato
-        if not rotation_config.get('enabled', True):
+        if not config.get('enabled', True):
             print("IP rotation monitoring disabilitato.", file=sys.stderr)
             return
         
-        interval = rotation_config.get('interval_seconds', 30) # intervallo tra le risoluzioni DNS
-        duration = rotation_config.get('duration_seconds', 120) # durata MINIMA del monitoraggio
+        interval = config.get('interval_seconds', 30)
+        duration = config.get('duration_seconds', 120)
         
         self.start_monitoring(domains, interval, duration)
 

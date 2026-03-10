@@ -13,7 +13,17 @@ class HostingIntelTool(Tool):
     """
     Tool per l'analisi dell'infrastruttura che ospita gli IP target.
     Utilizza 'cdncheck' (ProjectDiscovery) per identificare Cloud/CDN/WAF.
+    Parametri caricati da config/hosting_intel/config.json.
     """
+
+    # Defaults hardcoded come ultimo fallback se nessun file config è presente
+    DEFAULT_CONFIG = {
+        "dns_fallback_count": 2,
+        "dns_timeout": 2.0,
+        "max_workers": 50,
+        "cdncheck_timeout_per_ip": 1.0,
+        "cdncheck_timeout_buffer": 120
+    }
 
     def __init__(self, dns_resolvers: List[str] = None):
         """
@@ -48,22 +58,12 @@ class HostingIntelTool(Tool):
         
         scan_type = params.get("scan_type", "fast").lower()
 
-        # Determina fallback e timeout in base al profilo di scansione
-        if scan_type == "fast":
-            fallback_count = min(2, len(self.dns_resolvers))
-            timeout_sec = 2.0
-        elif scan_type == "stealth":
-            fallback_count = min(1, len(self.dns_resolvers))
-            timeout_sec = 10.0
-        elif scan_type == "accurate":
-            fallback_count = min(3, len(self.dns_resolvers))
-            timeout_sec = 5.0
-        elif scan_type == "comprehensive":
-            fallback_count = min(4, len(self.dns_resolvers))
-            timeout_sec = 8.0
-        else:
-            fallback_count = min(2, len(self.dns_resolvers))
-            timeout_sec = 2.0
+        # Carica configurazione da file con fallback chain
+        file_config = self.load_config("hosting_intel", scan_type)
+        self._config = {**self.DEFAULT_CONFIG, **file_config}
+        
+        fallback_count = min(self._config.get("dns_fallback_count", 2), len(self.dns_resolvers))
+        timeout_sec = self._config.get("dns_timeout", 2.0)
             
         print(f"Avvio analisi infrastruttura su {len(domains)} target (fallback={fallback_count}, timeout={timeout_sec}s)...", file=sys.stderr)
 
@@ -86,7 +86,7 @@ class HostingIntelTool(Tool):
             except Exception:
                 return target, None, None, None, "DNS Resolution Failed"
 
-        max_workers = min(50, len(domains) if domains else 1)
+        max_workers = min(self._config.get("max_workers", 50), len(domains) if domains else 1)
         with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
             future_to_domain = {executor.submit(resolve_domain, target): target for target in domains}
             for future in concurrent.futures.as_completed(future_to_domain):
@@ -152,7 +152,8 @@ class HostingIntelTool(Tool):
                 input=input_data,
                 capture_output=True,
                 text=True,
-                check=False
+                check=False,
+                timeout=(len(ips) * self._config.get("cdncheck_timeout_per_ip", 1.0)) + self._config.get("cdncheck_timeout_buffer", 120)
             )
             
             # Nota: cdncheck potrebbe scrivere banner su stdout/stderr. Vengono filtrate le righe che sembrano JSON validi.

@@ -1,0 +1,8 @@
+{
+    "connection_timeout": 3.0,
+    "read_timeout": 5.0,
+    "similarity_threshold": 0.85,
+    "length_ratio_threshold": 0.85,
+    "max_body_compare_length": 50000,
+    "max_workers": 10
+}

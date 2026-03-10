@@ -5,13 +5,27 @@ import shutil
 import os
 import tempfile
 import re
+from collections import defaultdict
 from typing import List, Dict, Any
 from .base_tool import Tool
 
 class PermutationTool(Tool):
     """
     Tool per la generazione di permutazioni di sottodomini utilizzando 'alterx'.
+    Parametri caricati da config/permutation/<scan_type>_config.json.
     """
+
+    # Defaults hardcoded come ultimo fallback se nessun file config è presente
+    DEFAULT_CONFIG = {
+        "max_wildcards": 5,
+        "min_occurrences": 3,
+        "process_timeout": 900,
+        "common_words": [
+            "api", "vpn", "dev", "test", "stage", "prod", "beta", "uat",
+            "admin", "app", "login", "auth", "portal", "db", "mail",
+            "gw", "k8s", "metrics", "grafana", "sso"
+        ]
+    }
 
     def __init__(self):
         """
@@ -52,8 +66,16 @@ class PermutationTool(Tool):
             # MOTORE EURISTICO: Estrazione Pattern e Costruzione Payload AlterX
             # -------------------------------------------------------------------
             scan_type = params.get("scan_type", "fast").lower()
-            max_wildcards = params.get("max_wildcards", 5)
-            extracted_patterns = self._extract_patterns(domains, scan_type=scan_type, max_wildcards=max_wildcards)
+            
+            # Carica configurazione da file con fallback chain
+            file_config = self.load_config("permutation", scan_type)
+            config = {**self.DEFAULT_CONFIG, **file_config}
+            # I parametri espliciti da CLI/JSON hanno priorità
+            config = self.merge_config(config, params, ["max_wildcards", "min_occurrences", "process_timeout"])
+            
+            max_wildcards = config.get("max_wildcards", 5)
+            min_occurrences = config.get("min_occurrences", 3)
+            extracted_patterns = self._extract_patterns(domains, scan_type=scan_type, min_occurrences=min_occurrences, max_wildcards=max_wildcards)
             local_payload = self._generate_payload(domains)
             
             # Scrive input, pattern e payload su file temporanei
@@ -76,18 +98,14 @@ class PermutationTool(Tool):
                 payload_file.close()
                 
                 # Crea e valorizza la wordlist "Common/Generica"
-                custom_common_path = params.get("common_wordlist")
+                custom_common_path = params.get("permutations_wordlist")
                 if custom_common_path and os.path.exists(custom_common_path):
                     common_payload_path = custom_common_path
                     print(f"  [*] Uso wordlist 'common' personalizzata: {custom_common_path}", file=sys.stderr)
                 else:
                     if custom_common_path:
                         print(f"  [!] Wordlist 'common' specificata non trovata ({custom_common_path}). Uso lista di fallback.", file=sys.stderr)
-                    common_words = [
-                        "api", "vpn", "dev", "test", "stage", "prod", "beta", "uat",
-                        "admin", "app", "login", "auth", "portal", "db", "mail",
-                        "gw", "k8s", "metrics", "grafana", "sso"
-                    ]
+                    common_words = config.get("common_words", self.DEFAULT_CONFIG["common_words"])
                     common_file = tempfile.NamedTemporaryFile(mode='w+', delete=False, suffix='_common.txt')
                     common_file.write('\n'.join(common_words))
                     common_payload_path = common_file.name
@@ -119,7 +137,7 @@ class PermutationTool(Tool):
                     capture_output=True,
                     text=True,
                     check=False,
-                    timeout=45
+                    timeout=config.get("process_timeout", 900)
                 )
             except subprocess.TimeoutExpired:
                 print(f"Errore: alterx ha superato il timeout.", file=sys.stderr)
@@ -150,7 +168,7 @@ class PermutationTool(Tool):
                 os.remove(patterns_file_path)
             if payload_file_path and os.path.exists(payload_file_path):
                 os.remove(payload_file_path)
-            custom_common_path = params.get("common_wordlist")
+            custom_common_path = params.get("permutations_wordlist")
             if common_payload_path and common_payload_path != custom_common_path and os.path.exists(common_payload_path):
                 os.remove(common_payload_path)
 
@@ -173,7 +191,6 @@ class PermutationTool(Tool):
             patterns.add('{{domain}}-{{common}}')
             
         # --- PASS 1: Analisi Frequenze per Constant Learning (solo Fast/Stealth) ---
-        from collections import defaultdict
         constant_freqs = defaultdict(lambda: defaultdict(lambda: defaultdict(int)))
         
         if is_fast_stealth:

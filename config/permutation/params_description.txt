@@ -1,0 +1,7 @@
+DESCRIZIONE PARAMETRI - PermutationTool (alterx)
+==============================================
+
+- max_wildcards: Numero massimo di variabili wildcard allowed nei pattern generati (limita l'esplosione combinatoria).
+- min_occurrences: Soglia minima di occorrenza di un token per identificarlo come costante (learning engine).
+- process_timeout: Tempo massimo in secondi per l'esecuzione del processo alterx.
+- common_words: Lista di parole generiche utilizzate per le permutazioni in assenza di una wordlist dedicata.

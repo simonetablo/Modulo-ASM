@@ -13,31 +13,22 @@ class SubdomainEnumTool(Tool):
     """
     Tool per la subdomain enumeration attiva.
     Utilizza 'puredns' per il bruteforce dei sottodomini.
+    Parametri caricati da config/subdomain_enum/<scan_type>_config.json.
     """
 
-    SCAN_PROFILES = {
-        "fast": {
-            "wordlist": "wordlists/subdomains.txt",
-            "flags": ["-l", "1000"]
-        },
-        "accurate": {
-            "wordlist": "wordlists/subdomains.txt",
-            "flags": ["-l", "5000"]
-        },
-        "comprehensive": {
-            "wordlist": "wordlists/subdomains.txt",
-            "flags": ["-l", "500"] 
-        },
-        "stealth": {
-            "wordlist": "wordlists/subdomains.txt",
-            "flags": ["-l", "100"]
-        }
+    # Defaults hardcoded come ultimo fallback se nessun file config è presente
+    DEFAULT_CONFIG = {
+        "wordlist": "wordlists/subdomains.txt",
+        "puredns_rate_limit": 5000,
+        "smart": True,
+        "max_depth": 5,
+        "smart_affixes": [
+            "-dev", "-prod", "-staging", "-test", "-uat", "-api", "-v1", "-v2",
+            "api-", "dev-", "test-", "staging-", "new-", "old-"
+        ],
+        "wildcard_early_exit": True,
+        "process_timeout": 3600
     }
-
-    SMART_AFFIXES = [
-        "-dev", "-prod", "-staging", "-test", "-uat", "-api", "-v1", "-v2",
-        "api-", "dev-", "test-", "staging-", "new-", "old-"
-    ]
 
     def __init__(self, dns_resolvers: List[str] = None):
         """
@@ -49,6 +40,7 @@ class SubdomainEnumTool(Tool):
         super().__init__()
         self.dns_resolvers = dns_resolvers or ['1.1.1.1', '8.8.8.8']
         self.results = {}
+        self._process_timeout = self.DEFAULT_CONFIG["process_timeout"]  # Default, sovrascritto in run()
         
         # Verifica dipendenze
         self.puredns_path = shutil.which("puredns")
@@ -109,9 +101,24 @@ class SubdomainEnumTool(Tool):
 
             else: # Default: bruteforce
                 scan_type = params.get("scan_type", "fast").lower()
-                smart_mode = params.get("smart", True)
-                max_depth = params.get("max_depth", 5)
-                wordlist_path, additional_flags = self._build_args(scan_type, params)
+                
+                # Carica configurazione da file con fallback chain
+                file_config = self.load_config("subdomain_enum", scan_type)
+                config = {**self.DEFAULT_CONFIG, **file_config}
+                # I parametri espliciti da CLI/JSON hanno priorità
+                config = self.merge_config(config, params, [
+                    "smart", "max_depth", "subdomains_wordlist", "puredns_rate_limit",
+                    "smart_affixes", "wildcard_early_exit", "process_timeout"
+                ])
+                # Rinomina subdomains_wordlist -> wordlist se presente
+                if "subdomains_wordlist" in config and config["subdomains_wordlist"]:
+                    config["wordlist"] = config["subdomains_wordlist"]
+                
+                smart_mode = config.get("smart", True)
+                max_depth = config.get("max_depth", 5)
+                wordlist_path = config.get("wordlist", "wordlists/subdomains.txt")
+                additional_flags = ["-l", str(config.get("puredns_rate_limit", 5000))]
+                self._process_timeout = config.get("process_timeout", 3600)
 
                 if not os.path.exists(wordlist_path):
                     print(f"Errore: Wordlist non trovata in {wordlist_path}", file=sys.stderr)
@@ -143,12 +150,11 @@ class SubdomainEnumTool(Tool):
                         if current_depth > 0:
                             print(f"  -> Livello Sottodominio {current_depth}/{max_depth}: bruteforce ricorsivo su {current_target}...", file=sys.stderr)
                             
-                        # Wildcard Check (Early-Exit): lo eseguiamo solo nei profili 'fast' o 'stealth'
-                        # per risparmiare query inutili sui resolver sui rami catch-all.
-                        # Per 'comprehensive' lasciamo fare l'intero lavoro all'algoritmo
-                        # interno di puredns, che è più preciso ma più lento/dispendioso.
+                        # Wildcard Check (Early-Exit): controllato da config "wildcard_early_exit"
+                        # Se abilitato, risparmia query inutili sui resolver in rami catch-all.
+                        # Se disabilitato, puredns gestisce internamente i wildcard (più preciso ma lento).
                         skip_bruteforce = False
-                        if scan_type in ["fast", "stealth"]:
+                        if config.get("wildcard_early_exit", False):
                             random_prefix = ''.join(random.choices(string.ascii_lowercase + string.digits, k=12))
                             wildcard_check_domain = f"{random_prefix}.{current_target}"
                             
@@ -175,7 +181,7 @@ class SubdomainEnumTool(Tool):
                         
                         # --- INIZIO SMART PERMUTATIONS ON-THE-FLY ---
                         if smart_mode and new_subdomains:
-                            smart_resolved = self._run_smart_permutations(current_target, new_subdomains, all_discovered, resolvers_file)
+                            smart_resolved = self._run_smart_permutations(current_target, new_subdomains, all_discovered, resolvers_file, config.get("smart_affixes", self.DEFAULT_CONFIG["smart_affixes"]))
                             if smart_resolved:
                                 new_subdomains.update(smart_resolved)
                         # --- FINE SMART PERMUTATIONS ON-THE-FLY ---
@@ -201,29 +207,19 @@ class SubdomainEnumTool(Tool):
             if os.path.exists(resolvers_file):
                 os.remove(resolvers_file)
 
-    def _build_args(self, scan_type: str, params: Dict[str, Any]) -> tuple:
-        """
-        Costruisce gli argomenti per puredns bruteforce in base al profilo di scansione.
-        """
-        if scan_type not in self.SCAN_PROFILES:
-            print(f"ATTENZIONE: scan_type '{scan_type}' non riconosciuto. Utilizzo 'fast'.", file=sys.stderr)
-            scan_type = "fast"
-        
-        profile = self.SCAN_PROFILES[scan_type]
-        wordlist_path = params.get("wordlist") or profile["wordlist"]
-        additional_flags = profile.get("flags", [])
-        
-        return wordlist_path, additional_flags
+    # _build_args rimossa: la costruzione dei parametri è ora integrata in run()
+    # tramite il sistema di config files.
 
-    def _run_smart_permutations(self, current_target: str, new_subdomains: set, all_discovered: set, resolvers_file: str) -> set:
+    def _run_smart_permutations(self, current_target: str, new_subdomains: set, all_discovered: set, resolvers_file: str, smart_affixes: list = None) -> set:
         """
         Genera e risolve micro-permutazioni on-the-fly basate sui risultati correnti.
         """
         smart_candidates = set()
+        affixes = smart_affixes or self.DEFAULT_CONFIG["smart_affixes"]
         for sub in new_subdomains:
             if sub.endswith(f".{current_target}") and sub != current_target:
                 prefix = sub[:-(len(current_target)+1)]
-                for affix in self.SMART_AFFIXES:
+                for affix in affixes:
                     if affix.startswith("-"):
                         smart_candidates.add(f"{prefix}{affix}.{current_target}")
                     elif affix.endswith("-"):
@@ -291,7 +287,8 @@ class SubdomainEnumTool(Tool):
                 cmd,
                 capture_output=True,
                 text=True,
-                check=False
+                check=False,
+                timeout=self._process_timeout
             )
             # Filtra le linee vuote e restituisce i domini unici
             results = list(set(line.strip() for line in process.stdout.splitlines() if line.strip()))

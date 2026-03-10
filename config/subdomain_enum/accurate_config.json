@@ -1,0 +1,24 @@
+{
+    "wordlist": "wordlists/subdomains.txt",
+    "puredns_rate_limit": 1000,
+    "smart": true,
+    "max_depth": 5,
+    "smart_affixes": [
+        "-dev",
+        "-prod",
+        "-staging",
+        "-test",
+        "-uat",
+        "-api",
+        "-v1",
+        "-v2",
+        "api-",
+        "dev-",
+        "test-",
+        "staging-",
+        "new-",
+        "old-"
+    ],
+    "wildcard_early_exit": false,
+    "process_timeout": 3600
+}

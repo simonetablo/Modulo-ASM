@@ -1,0 +1,6 @@
+DESCRIZIONE PARAMETRI - JsAnalyzerTool (jsluice)
+==============================================
+
+- jsluice_concurrency: Numero di thread concorrenti utilizzati internamente da jsluice per l'analisi di un singolo file.
+- batch_size: Numero di file JavaScript raggruppati in un singolo batch per l'elaborazione.
+- max_workers: Numero di processori di batch paralleli (dimensione del thread pool).

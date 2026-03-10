@@ -1,0 +1,27 @@
+{
+    "max_wildcards": 5,
+    "min_occurrences": 3,
+    "process_timeout": 900,
+    "common_words": [
+        "api",
+        "vpn",
+        "dev",
+        "test",
+        "stage",
+        "prod",
+        "beta",
+        "uat",
+        "admin",
+        "app",
+        "login",
+        "auth",
+        "portal",
+        "db",
+        "mail",
+        "gw",
+        "k8s",
+        "metrics",
+        "grafana",
+        "sso"
+    ]
+}

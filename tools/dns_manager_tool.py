@@ -13,18 +13,23 @@ from .base_tool import Tool
 class DnsManagerTool(Tool):
     """
     Tool per la gestione centralizzata dei DNS resolvers pubblici.
-    Scarica, valida (opzionale) e distribuisce una lista fresca di resolver
-    per l'intera infrastruttura ASM.
+    Parametri caricati da config/dns_manager/config.json.
     """
+
+    # Defaults hardcoded come ultimo fallback se nessun file config è presente
+    DEFAULT_CONFIG = {
+        "max_resolvers": 50,
+        "freshness_hours": 24,
+        "doh_max_retries": 3,
+        "validation_max_workers": 50
+    }
 
     RESOLVERS_URL = "https://raw.githubusercontent.com/trickest/resolvers/main/resolvers.txt"
     TRUSTED_RESOLVERS_URL = "https://raw.githubusercontent.com/trickest/resolvers/main/resolvers-trusted.txt"
     LOCAL_RESOLVERS_FILE = "wordlists/resolvers.txt"
     LOCAL_TRUSTED_RESOLVERS_FILE = "wordlists/resolvers-trusted.txt"
-    MAX_AGE_HOURS = 24
     HARDCODED_FALLBACK = ['1.1.1.1', '8.8.8.8', '8.8.4.4', '9.9.9.9']
     
-    # Endpoint DNS-over-HTTPS che restituiscono formato JSON standard
     DOH_ENDPOINTS = [
         "https://dns.google/resolve",
         "https://cloudflare-dns.com/dns-query",
@@ -36,8 +41,10 @@ class DnsManagerTool(Tool):
     def __init__(self):
         super().__init__()
         self.resolvers = []
-        # Assicurati che la directory wordlists esista
         os.makedirs("wordlists", exist_ok=True)
+        # Carica configurazione
+        file_config = self.load_config("dns_manager")
+        self._config = {**self.DEFAULT_CONFIG, **file_config}
 
     def run(self, domains: List[str] = None, params: Dict[str, Any] = None) -> None:
         pass # Metodo inutilizzato in questo contesto, presente per conformità alla classe Tool
@@ -49,10 +56,10 @@ class DnsManagerTool(Tool):
         resolvers = self._load_local_resolvers(self.LOCAL_TRUSTED_RESOLVERS_FILE)
         return resolvers if resolvers else self.HARDCODED_FALLBACK
 
-    def get_resolvers(self, max_count: int = 50) -> List[str]:
+    def get_resolvers(self, max_count: int = None) -> List[str]:
         """
-        Restituisce una lista di DNS Resolvers. 
-        Se il file locale è vecchio (più di 24 ore) o mancante, lo riscarica da Trickest.
+        Restituisce una lista di DNS Resolvers.
+        max_count: se None, usa il valore dal config; se 0, restituisce tutti.
         """
         if not self._is_local_file_fresh(self.LOCAL_RESOLVERS_FILE):
             self._download_resolvers()
@@ -66,6 +73,8 @@ class DnsManagerTool(Tool):
 
         # Ritorna i primi N resolver per non sovraccaricare il resolver python locale, 
         # oppure tutti se richiesto (passando 0 o None), ideale per massdns/puredns che gestiscono bene liste immense.
+        if max_count is None:
+            max_count = self._config.get("max_resolvers", 50)
         if max_count and max_count > 0:
             resolvers = resolvers[:max_count]
             
@@ -84,7 +93,7 @@ class DnsManagerTool(Tool):
         current_time = time.time()
         age_hours = (current_time - file_mod_time) / 3600
         
-        return age_hours < self.MAX_AGE_HOURS
+        return age_hours < self._config.get("freshness_hours", 24)
 
     def _download_list(self, url: str, dest_file: str, do_sanity_check: bool = False) -> None:
         print(f"  [*] Download da {url}...", file=sys.stderr)
@@ -129,7 +138,7 @@ class DnsManagerTool(Tool):
     def get_results(self) -> str:
         return '{"status": "ok"}'
 
-    def _filter_valid_resolvers(self, resolvers: List[str], max_workers: int = 50) -> List[str]:
+    def _filter_valid_resolvers(self, resolvers: List[str], max_workers: int = None) -> List[str]:
         """
         Esegue un sanity check sui resolver per scartare quelli misconfigurati o "poisoned".
         Verifica che risolvano un dominio noto ed eludano un dominio inesistente (NXDOMAIN).
@@ -162,6 +171,8 @@ class DnsManagerTool(Tool):
             except Exception:
                 return None
                 
+        if max_workers is None:
+            max_workers = self._config.get("validation_max_workers", 50)
         with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
             # Per evitare lunghissimi tempi, testiamone un subset se sono troppi.
             # Trickest resolver list è di circa ~10.000 IP.
@@ -180,7 +191,7 @@ class DnsManagerTool(Tool):
         Effettua un massimo di 3 retry in caso di errore di connettività proxy.
         Ritorna True se il dominio esiste (valido), False altrimenti.
         """
-        max_retries = 3
+        max_retries = self._config.get("doh_max_retries", 3)
         
         for attempt in range(max_retries):
             # Ad ogni iterazione scegliamo randomicamente Endpoint e Proxy (Rotazione IP)
