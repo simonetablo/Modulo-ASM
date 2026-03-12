@@ -7,7 +7,7 @@ import string
 import random
 import tempfile
 from typing import List, Dict, Any
-from .base_tool import Tool
+from .base_tool import Tool, BASE_DIR
 
 class SubdomainEnumTool(Tool):
     """
@@ -18,7 +18,7 @@ class SubdomainEnumTool(Tool):
 
     # Defaults hardcoded come ultimo fallback se nessun file config è presente
     DEFAULT_CONFIG = {
-        "wordlist": "wordlists/subdomains.txt",
+        "wordlist": os.path.join(BASE_DIR, "wordlists/subdomains.txt"),
         "puredns_rate_limit": 5000,
         "smart": True,
         "max_depth": 5,
@@ -116,8 +116,23 @@ class SubdomainEnumTool(Tool):
                 
                 smart_mode = config.get("smart", True)
                 max_depth = config.get("max_depth", 5)
-                wordlist_path = config.get("wordlist", "wordlists/subdomains.txt")
-                additional_flags = ["-l", str(config.get("puredns_rate_limit", 5000))]
+                
+                # Rate limit logic: max_rate_dns > max_rate > profile puredns_rate_limit > polite timing
+                max_rate_dns = params.get("max_rate_dns")
+                max_rate = params.get("max_rate")
+                timing = params.get("timing", "normal")
+                
+                if max_rate_dns:
+                    puredns_rate = max_rate_dns
+                elif max_rate:
+                    puredns_rate = max_rate
+                elif timing == 'polite':
+                    puredns_rate = 500 # Un decimo del default per prudenza
+                else:
+                    puredns_rate = config.get("puredns_rate_limit", 5000)
+                
+                wordlist_path = config.get("wordlist", os.path.join(BASE_DIR, "wordlists/subdomains.txt"))
+                additional_flags = ["-l", str(puredns_rate)]
                 self._process_timeout = config.get("process_timeout", 3600)
 
                 if not os.path.exists(wordlist_path):

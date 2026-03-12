@@ -8,7 +8,7 @@ import concurrent.futures
 import dns.resolver
 import dns.exception
 from typing import List, Dict, Any
-from .base_tool import Tool
+from .base_tool import Tool, BASE_DIR
 
 class DnsManagerTool(Tool):
     """
@@ -24,10 +24,8 @@ class DnsManagerTool(Tool):
         "validation_max_workers": 50
     }
 
-    RESOLVERS_URL = "https://raw.githubusercontent.com/trickest/resolvers/main/resolvers.txt"
-    TRUSTED_RESOLVERS_URL = "https://raw.githubusercontent.com/trickest/resolvers/main/resolvers-trusted.txt"
-    LOCAL_RESOLVERS_FILE = "wordlists/resolvers.txt"
-    LOCAL_TRUSTED_RESOLVERS_FILE = "wordlists/resolvers-trusted.txt"
+    LOCAL_RESOLVERS_FILE = os.path.join(BASE_DIR, "wordlists/resolvers.txt")
+    LOCAL_TRUSTED_RESOLVERS_FILE = os.path.join(BASE_DIR, "wordlists/resolvers-trusted.txt")
     HARDCODED_FALLBACK = ['1.1.1.1', '8.8.8.8', '8.8.4.4', '9.9.9.9']
     
     DOH_ENDPOINTS = [
@@ -41,7 +39,7 @@ class DnsManagerTool(Tool):
     def __init__(self):
         super().__init__()
         self.resolvers = []
-        os.makedirs("wordlists", exist_ok=True)
+        os.makedirs(os.path.join(BASE_DIR, "wordlists"), exist_ok=True)
         # Carica configurazione
         file_config = self.load_config("dns_manager")
         self._config = {**self.DEFAULT_CONFIG, **file_config}
@@ -49,23 +47,25 @@ class DnsManagerTool(Tool):
     def run(self, domains: List[str] = None, params: Dict[str, Any] = None) -> None:
         pass # Metodo inutilizzato in questo contesto, presente per conformità alla classe Tool
 
-    def get_trusted_resolvers(self) -> List[str]:
-        if not self._is_local_file_fresh(self.LOCAL_TRUSTED_RESOLVERS_FILE):
-            self._download_trusted_resolvers()
+    def get_trusted_resolvers(self, wl_manager: Any = None) -> List[str]:
+        filepath = self.LOCAL_TRUSTED_RESOLVERS_FILE
+        if wl_manager:
+            filepath = wl_manager.get_wordlist("dns", "trusted")
         
-        resolvers = self._load_local_resolvers(self.LOCAL_TRUSTED_RESOLVERS_FILE)
+        resolvers = self._load_local_resolvers(filepath)
         return resolvers if resolvers else self.HARDCODED_FALLBACK
 
-    def get_resolvers(self, max_count: int = None) -> List[str]:
+    def get_resolvers(self, max_count: int = None, wl_manager: Any = None) -> List[str]:
         """
         Restituisce una lista di DNS Resolvers.
         max_count: se None, usa il valore dal config; se 0, restituisce tutti.
         """
-        if not self._is_local_file_fresh(self.LOCAL_RESOLVERS_FILE):
-            self._download_resolvers()
+        filepath = self.LOCAL_RESOLVERS_FILE
+        if wl_manager:
+            filepath = wl_manager.get_wordlist("dns", "resolvers")
 
-        resolvers = self._load_local_resolvers(self.LOCAL_RESOLVERS_FILE)
-        trusted = self.get_trusted_resolvers()
+        resolvers = self._load_local_resolvers(filepath)
+        trusted = self.get_trusted_resolvers(wl_manager=wl_manager)
         
         if not resolvers:
             print("  [!] Nessun resolver trovato nel file, utilizzo fallback.", file=sys.stderr)
@@ -84,49 +84,6 @@ class DnsManagerTool(Tool):
             resolvers.append(trusted_fallback)
             
         return resolvers
-
-    def _is_local_file_fresh(self, filepath: str) -> bool:
-        if not os.path.exists(filepath):
-            return False
-            
-        file_mod_time = os.path.getmtime(filepath)
-        current_time = time.time()
-        age_hours = (current_time - file_mod_time) / 3600
-        
-        return age_hours < self._config.get("freshness_hours", 24)
-
-    def _download_list(self, url: str, dest_file: str, do_sanity_check: bool = False) -> None:
-        print(f"  [*] Download da {url}...", file=sys.stderr)
-        try:
-            response = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=10)
-            response.raise_for_status()
-            content = response.text
-                
-            # Filtra linee vuote o commenti
-            valid_ips = [line.strip() for line in content.splitlines() if line.strip() and not line.startswith('#')]
-            
-            if valid_ips:
-                if do_sanity_check:
-                    print(f"  [*] Scaricati {len(valid_ips)} resolvers. Avvio sanity check...", file=sys.stderr)
-                    valid_ips = self._filter_valid_resolvers(valid_ips)
-                
-                if valid_ips:
-                    with open(dest_file, 'w') as f:
-                        f.write('\n'.join(valid_ips))
-                    print(f"  [+] Salvati {len(valid_ips)} resolvers in {dest_file}", file=sys.stderr)
-                else:
-                    print(f"  [!] Nessun resolver ha superato il sanity check per {dest_file}.", file=sys.stderr)
-            else:
-                print(f"  [!] Nessun resolver valido scaricato da {url}.", file=sys.stderr)
-                
-        except Exception as e:
-            print(f"  [!] Errore durante il download dal URL {url}: {e}", file=sys.stderr)
-
-    def _download_resolvers(self) -> None:
-        self._download_list(self.RESOLVERS_URL, self.LOCAL_RESOLVERS_FILE, do_sanity_check=True)
-
-    def _download_trusted_resolvers(self) -> None:
-        self._download_list(self.TRUSTED_RESOLVERS_URL, self.LOCAL_TRUSTED_RESOLVERS_FILE, do_sanity_check=False)
 
     def _load_local_resolvers(self, filepath: str) -> List[str]:
         try:
@@ -252,7 +209,7 @@ class DnsManagerTool(Tool):
         print(f"Double check su {len(domains)} domini con DNS fidati (DoH Proxy mode: {use_doh})...", file=sys.stderr)
         
         if use_doh:
-            valid_domains = []
+            valid_map = {}
             
             # Modalità DoH (Multithreaded per coprire l'overhead TCP/HTTP e proxy)
             # Parallelizziamo le requests HTTP.
@@ -263,10 +220,10 @@ class DnsManagerTool(Tool):
                 for future in concurrent.futures.as_completed(future_to_domain):
                     dom = future_to_domain[future]
                     is_valid = future.result()
-                    if is_valid:
-                        valid_domains.append(dom)
-                        
-            return valid_domains
+                    valid_map[dom] = is_valid
+            
+            # Ricostruzione lista preservando l'ordine originale
+            return [dom for dom in domains if valid_map.get(dom)]
         else:
             # Modalità classica UDP
             valid_domains = []

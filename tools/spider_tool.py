@@ -203,7 +203,7 @@ class SpiderTool(Tool):
                              path = f"{path}?{query}"
                          if path:
                              paths_only.add(path)
-                 except: continue
+                 except Exception: continue
              
              with self.lock:
                  self.results[url] = {

@@ -7,9 +7,7 @@ import threading
 import concurrent.futures
 import uuid
 from typing import List, Dict, Any
-from .base_tool import Tool
-
-BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+from .base_tool import Tool, BASE_DIR
 
 class ContentDiscoveryTool(Tool):
     """
@@ -34,23 +32,14 @@ class ContentDiscoveryTool(Tool):
         "nginx": [".html", ".txt", ".bak", ".conf"]
     }
 
-    # Mappatura Tecnologie -> Wordlist Specifiche
-    TECH_WORDLIST_MAP = {
-        "wordpress": "wordlists/tech/wordpress.txt",
-        "iis": "wordlists/tech/iis.txt",
-        "asp.net": "wordlists/tech/iis.txt",
-        "tomcat": "wordlists/tech/tomcat.txt",
-        "apache": "wordlists/tech/apache.txt",
-        "nginx": "wordlists/tech/nginx.txt",
-        "spring": "wordlists/tech/spring.txt",
-        "node.js": "wordlists/tech/nodejs.txt"
-    }
+    # WordlistManagerTool instance (optional)
+    wl_manager = None
 
     # Profili FFUF - Parametri caricati da config/content_discovery/<scan_type>_config.json
     DEFAULT_CONFIG = {
         "threads": 50,
         "rate": 0,
-        "timeout_minutes": 5,
+        "timeout_minutes": 15,
         "recursion_depth": 0,
         "match_codes": "200,204,301,302,307,401,403,405",
         "max_workers": 3,
@@ -90,7 +79,7 @@ class ContentDiscoveryTool(Tool):
              print("ATTENZIONE: Nessuna wordlist trovata nei path di default. Fornisci un file valido per il Web Fuzzing.", file=sys.stderr)
 
 
-    def run(self, targets: List[str], params: Dict[str, Any], httpx_results: Dict[str, Any] = None, target_params: Dict[str, Dict] = None, dynamic_wordlists: Dict[str, List[str]] = None) -> None:
+    def run(self, targets: List[str], params: Dict[str, Any], httpx_results: Dict[str, Any] = None, target_params: Dict[str, Dict] = None, dynamic_wordlists: Dict[str, List[str]] = None, wl_manager: Any = None) -> None:
         """
         Esegue il Web Fuzzing Context-Aware sugli URL forniti.
         
@@ -100,7 +89,9 @@ class ContentDiscoveryTool(Tool):
             httpx_results: Il sub-documento JSON contenente i tech tags (necessario per l'estrazione context-aware).
             target_params: Override dei profili per singoli root domains
             dynamic_wordlists: Dizionario {base_domain: [paths...]} contenente i path trovati da Katana/Jsluice 
+            wl_manager: Istanza di WordlistManagerTool per ottenere wordlist tecnologiche dinamiche
         """
+        self.wl_manager = wl_manager
         if not self.ffuf_path:
             for t in targets:
                  self.results[t] = {"error": "ffuf non trovato nel PATH"}
@@ -125,7 +116,10 @@ class ContentDiscoveryTool(Tool):
             clean_url = url.replace('http://', '').replace('https://', '')
             base_domain = clean_url.split('/')[0].split(':')[0]
             
-            scan_type = target_params.get(base_domain, {}).get("scan_type", params.get("scan_type", "fast")).lower()
+            domain_cfg = target_params.get(base_domain, {})
+            scan_type = domain_cfg.get("scan_type", params.get("scan_type", "fast")).lower()
+            max_rate = domain_cfg.get("max_rate", params.get("max_rate"))
+            timing = domain_cfg.get("timing", params.get("timing", "normal"))
                  
             # Carica configurazione da file con fallback chain
             file_config = self.load_config("content_discovery", scan_type)
@@ -183,7 +177,7 @@ class ContentDiscoveryTool(Tool):
 
             try:
                 # 3. Costruzione e Lancio Comando FFUF
-                self._execute_ffuf(url, ext_flag, profile, scan_type, recursion_depth, tech_wordlists, dyn_wl_file)
+                self._execute_ffuf(url, ext_flag, profile, scan_type, recursion_depth, tech_wordlists, dyn_wl_file, max_rate=max_rate, timing=timing)
             finally:
                 if dyn_wl_file and os.path.exists(dyn_wl_file):
                      try:
@@ -228,13 +222,12 @@ class ContentDiscoveryTool(Tool):
          Mappa i tag "tech" dell'URL specificato allestendo un set deduplicato di wordlist specifiche.
          """
          wl_set = set()
+         if not self.wl_manager:
+              return []
+
          target_data = httpx_results.get(url, {})
-         
          techs = target_data.get("tech", [])
          
-         # 2. Smart Related Wordlists (Miglioria: Aggiunta logica per tecnologie "figlie" in scansioni profonde)
-         # Se troviamo PHP o un Web Server generico e scansioniamo in modo 'accurate' o 'comprehensive',
-         # aumentiamo la coverage inserendo wordlist di CMS comuni anche se Httpx non li ha confermati
          deep_scan = scan_type in ["accurate", "comprehensive"]
          extra_techs_to_check = set()
          
@@ -245,28 +238,22 @@ class ContentDiscoveryTool(Tool):
                      extra_techs_to_check.update(["wordpress"]) # Aggiunge WP bypassando la detection esplicita di httpx
                  elif "java" in tech_lower:
                      extra_techs_to_check.update(["tomcat", "spring"])
-                 
-         for tech in techs:
-             tech_lower = tech.lower()
-             
-             for known_tech, mapped_wl_rel in self.TECH_WORDLIST_MAP.items():
-                  if known_tech in tech_lower:
-                       mapped_wl = os.path.join(BASE_DIR, mapped_wl_rel)
-                       if os.path.exists(mapped_wl):
-                           wl_set.add(mapped_wl)
-                           
-         if deep_scan:
-             for extra_tech in extra_techs_to_check:
-                 for known_tech, mapped_wl_rel in self.TECH_WORDLIST_MAP.items():
-                      if known_tech in extra_tech:
-                           mapped_wl = os.path.join(BASE_DIR, mapped_wl_rel)
-                           if os.path.exists(mapped_wl):
-                               wl_set.add(mapped_wl)
-                               print(f"[{url}] Deep scan: Aggiunta wordlist euristica per probabile {known_tech} derivato.", file=sys.stderr)
-                       
+                  
+         # Risoluzione tramite Wordlist Manager
+         for tech in list(techs) + list(extra_techs_to_check):
+              wl_path = self.wl_manager.get_wordlist("content_discovery", tech=tech)
+              if wl_path and os.path.exists(wl_path):
+                   # Evitiamo di inserire la wordlist base se è la stessa (poteva capitare col fallback a 'general')
+                   if wl_path != os.path.abspath(self.wordlist):
+                        if tech in extra_techs_to_check and tech not in techs:
+                             print(f"[{url}] Deep scan: Aggiunta wordlist euristica per probabile {tech} derivato.", file=sys.stderr)
+                        else:
+                             print(f"[{url}] Trovata wordlist specifica per la tech: {tech}", file=sys.stderr)
+                        wl_set.add(wl_path)
+                        
          return list(wl_set)
          
-    def _execute_ffuf(self, url: str, ext_flag: str, profile: Dict[str, Any], scan_type: str, recursion_depth: int, tech_wordlists: List[str] = None, dynamic_wordlist: str = None) -> None:
+    def _execute_ffuf(self, url: str, ext_flag: str, profile: Dict[str, Any], scan_type: str, recursion_depth: int, tech_wordlists: List[str] = None, dynamic_wordlist: str = None, max_rate: int = None, timing: str = "normal") -> None:
         """
         Innesca il processo ffuf, parsando l'stdout line-by-line (formato JSON)
         ed accumulando i risultati validati nella directory.
@@ -282,25 +269,25 @@ class ContentDiscoveryTool(Tool):
         if dynamic_wordlist:
              # RUN SPECIALE: Fuzzing attivo chirurgico sui path trovati dallo spidering
              # Lo spidering trova il path "pulito", Ffuf proverà ad appendere le estensioni scoperte (es: /api/users -> /api/users.bak)
-             self._do_ffuf_run(url, target_url, [dynamic_wordlist], ext_flag, profile, scan_type, recursion_depth, "Spidering Context")
+             self._do_ffuf_run(url, target_url, [dynamic_wordlist], ext_flag, profile, scan_type, recursion_depth, "Spidering Context", max_rate=max_rate, timing=timing)
         
         if tech_wordlists:
             # RUN 1: Wordlist Base
             # Nei profili "fast" o "stealth", se abbiamo wordlists tecnologiche specifiche (W2),
             # saltiamo del tutto la ricerca generalista (W1) per risparmiare moltissimo tempo ed essere furtivi.
             if scan_type not in ["fast", "stealth"]:
-                self._do_ffuf_run(url, target_url, [self.wordlist], ext_flag, profile, scan_type, recursion_depth, "Base + Estensioni")
+                self._do_ffuf_run(url, target_url, [self.wordlist], ext_flag, profile, scan_type, recursion_depth, "Base + Estensioni", max_rate=max_rate, timing=timing)
             else:
                 print(f"[{url}] Profilo '{scan_type}': Salto directory fuzzing generico, uso solo tech-words.", file=sys.stderr)
             
             # RUN 2: Wordlist Specifiche
-            self._do_ffuf_run(url, target_url, tech_wordlists, "", profile, scan_type, recursion_depth, "Dizionari Tech")
+            self._do_ffuf_run(url, target_url, tech_wordlists, "", profile, scan_type, recursion_depth, "Dizionari Tech", max_rate=max_rate, timing=timing)
             
         else:
             # Singola run normale se non ci sono tecnologie specifiche trovate
-            self._do_ffuf_run(url, target_url, [self.wordlist], ext_flag, profile, scan_type, recursion_depth, "Singola")
+            self._do_ffuf_run(url, target_url, [self.wordlist], ext_flag, profile, scan_type, recursion_depth, "Singola", max_rate=max_rate, timing=timing)
 
-    def _do_ffuf_run(self, original_url: str, base_url: str, wordlists: List[str], ext_flag: str, profile: Dict[str, Any], scan_type: str, recursion_depth: int, run_desc: str) -> None:
+    def _do_ffuf_run(self, original_url: str, base_url: str, wordlists: List[str], ext_flag: str, profile: Dict[str, Any], scan_type: str, recursion_depth: int, run_desc: str, max_rate: int = None, timing: str = "normal") -> None:
         """
         Esegue un singolo comando Ffuf
         """
@@ -328,13 +315,17 @@ class ContentDiscoveryTool(Tool):
         timeout_val = profile.get("timeout_minutes", 5) * 60
         cmd.extend(["-maxtime", str(timeout_val)])
         
-        if profile.get("rate", 0) > 0:
+        if max_rate:
+             cmd.extend(["-rate", str(max_rate)])
+        elif timing == 'polite':
+             cmd.extend(["-rate", "10"])
+        elif profile.get("rate", 0) > 0:
              cmd.extend(["-rate", str(profile["rate"])])
 
         # Aggiunta di Recursive Fuzzing se abilitato e solo su dizionari non mirati
         if "Base" in run_desc and recursion_depth > 0:
              cmd.extend(["-recursion", "-recursion-depth", str(recursion_depth)])
-             if profile.get("rate", 0) == 0:
+             if "-rate" not in cmd:
                  cmd.extend(["-rate", "100"]) # Non sfondare il server in recursione
 
         try:
@@ -344,30 +335,45 @@ class ContentDiscoveryTool(Tool):
              # FFuf stampa righe json in caso di risultati.
              findings = []
              if process.stdout:
-                 try:
-                     # L'output di -json standard in ffuf e' un unico grande JSON object.
-                     obj = json.loads(process.stdout)
-                     if "results" in obj:
-                          for match in obj["results"]:
-                               findings.append({
-                                   "endpoint": match.get("url", ""),
-                                   "status": match.get("status", 0),
-                                   "length": match.get("length", 0),
-                                   "words": match.get("words", 0),
-                                   "lines": match.get("lines", 0),
-                                   "content_type": match.get("content-type", "")
-                               })
-                 except json.JSONDecodeError:
-                     # Fallback in caso stampi array misti
-                     for line in process.stdout.strip().split('\n'):
-                         if not line.strip():
-                             continue
-                         try:
-                             obj = json.loads(line)
-                             if "url" in obj and "status" in obj:
-                                 findings.append(obj)
-                         except json.JSONDecodeError:
-                             pass
+                  content = process.stdout.strip()
+                  try:
+                      # 1. Tentativo parsing unico blocco JSON
+                      json_start = content.find('{')
+                      if json_start != -1:
+                          try:
+                              obj = json.loads(content[json_start:])
+                              if "results" in obj:
+                                   for match in obj["results"]:
+                                        findings.append({
+                                            "endpoint": match.get("url", ""),
+                                            "status": match.get("status", 0),
+                                            "length": match.get("length", 0),
+                                            "words": match.get("words", 0),
+                                            "lines": match.get("lines", 0),
+                                            "content_type": match.get("content-type", "")
+                                        })
+                          except json.JSONDecodeError as e:
+                              if "Extra data" in str(e): raise e
+                              print(f"[{url}] Errore parsing unico JSON: {e}", file=sys.stderr)
+
+                  except json.JSONDecodeError:
+                      # 2. Fallback: Parsing JSONL
+                      for line in content.splitlines():
+                          line = line.strip()
+                          if not line.startswith('{'): continue
+                          try:
+                              match = json.loads(line)
+                              if "url" in match:
+                                   findings.append({
+                                       "endpoint": match.get("url", ""),
+                                       "status": match.get("status", 0),
+                                       "length": match.get("length", 0),
+                                       "words": match.get("words", 0),
+                                       "lines": match.get("lines", 0),
+                                       "content_type": match.get("content-type", "")
+                                   })
+                          except json.JSONDecodeError:
+                              continue
              
              # Logica di deduplicazione: evitare doppi accodamenti dello stesso endpoint
              with self.lock:
@@ -375,7 +381,7 @@ class ContentDiscoveryTool(Tool):
                      self.results[original_url] = []
                      
                  # Estrae tutti gli endpoint già presenti per questo url
-                 existing_endpoints = {f["endpoint"] for f in self.results[original_url] if getattr(f, "get", lambda x: None)("endpoint")}
+                 existing_endpoints = {f["endpoint"] for f in self.results[original_url] if isinstance(f, dict) and f.get("endpoint")}
                  
                  unique_findings = []
                  for f in findings:

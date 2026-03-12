@@ -19,12 +19,7 @@ class PermutationTool(Tool):
     DEFAULT_CONFIG = {
         "max_wildcards": 5,
         "min_occurrences": 3,
-        "process_timeout": 900,
-        "common_words": [
-            "api", "vpn", "dev", "test", "stage", "prod", "beta", "uat",
-            "admin", "app", "login", "auth", "portal", "db", "mail",
-            "gw", "k8s", "metrics", "grafana", "sso"
-        ]
+        "process_timeout": 900
     }
 
     def __init__(self):
@@ -41,7 +36,7 @@ class PermutationTool(Tool):
                 self.alterx_path = None
                 print("ATTENZIONE: Eseguibile 'alterx' non trovato. La generazione di permutazioni fallirà.", file=sys.stderr)
 
-    def run(self, domains: List[str], params: Dict[str, Any]) -> None:
+    def run(self, domains: List[str], params: Dict[str, Any], wl_manager: Any = None) -> None:
         """
         Genera permutazioni per la lista di domini fornita.
         
@@ -102,10 +97,12 @@ class PermutationTool(Tool):
                 if custom_common_path and os.path.exists(custom_common_path):
                     common_payload_path = custom_common_path
                     print(f"  [*] Uso wordlist 'common' personalizzata: {custom_common_path}", file=sys.stderr)
+                elif wl_manager:
+                    common_payload_path = wl_manager.get_wordlist("permutations")
+                    print(f"  [*] Uso wordlist 'common' centralizzata: {common_payload_path}", file=sys.stderr)
                 else:
-                    if custom_common_path:
-                        print(f"  [!] Wordlist 'common' specificata non trovata ({custom_common_path}). Uso lista di fallback.", file=sys.stderr)
-                    common_words = config.get("common_words", self.DEFAULT_CONFIG["common_words"])
+                    # Fallback estremo se non c'è il manager (es. test unitari isolati)
+                    common_words = ["api", "dev", "test", "prod", "admin", "mail", "vpn"]
                     common_file = tempfile.NamedTemporaryFile(mode='w+', delete=False, suffix='_common.txt')
                     common_file.write('\n'.join(common_words))
                     common_payload_path = common_file.name
@@ -307,10 +304,10 @@ class PermutationTool(Tool):
             tokens = re.split(r'[.-]', dom)
             for token in tokens:
                 if len(token) > 1 and not token.isdigit():
-                    # Stop-Words Filtraggio Esadecimale (Scartiamo lunghi hash alfanumerici casuali es. b6f2a8c3)
+                    # Stop-Words Filtraggio Hash (Scartiamo lunghi hash alfanumerici casuali es. b6f2a8c3)
+                    # Migliorato: scarta stringhe hex >= 8 caratteri anche se puramente alfabetiche (es. ffffffff) o miste
                     if len(token) >= 8 and re.match(r'^[a-fA-F0-9]+$', token):
-                        if not token.isalpha() and not token.isdigit():
-                            continue # Hash alfanumerico misto scartato
+                        continue 
                     words.add(token.lower())
                     
         return list(words)

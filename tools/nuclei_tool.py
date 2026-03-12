@@ -20,8 +20,8 @@ class NucleiTool(Tool):
         "excluded_tags": "cve,sqli,xss,rce,fuzz,dos,auth-bypass,takeover,lfi,ssrf,injection,misconfig",
         "polite_rate_limit": 20,
         "polite_timeout": 10,
-        "process_timeout_per_target": 15,
-        "process_timeout_buffer": 300
+        "process_timeout_per_target": 60,
+        "process_timeout_buffer": 600
     }
 
     def __init__(self):
@@ -84,9 +84,9 @@ class NucleiTool(Tool):
             clean_url = url.replace('http://', '').replace('https://', '')
             base_domain = clean_url.split('/')[0].split(':')[0]
             
-            params = target_params.get(base_domain, {})
-            timing = params.get('timing', 'normal')
-            max_rate = params.get('max_rate')
+            domain_params = target_params.get(base_domain, {})
+            timing = domain_params.get('timing', 'normal')
+            max_rate = domain_params.get('max_rate')
             
             key = (timing, max_rate)
             if key not in groups:

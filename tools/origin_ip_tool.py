@@ -136,21 +136,42 @@ class OriginIpTool(Tool):
         validated = []
         
         # 1. Fase di Fast Probe: Eliminiamo subito gli IP che non rispondono a nulla (Porta 80/443)
-        # Questo riduce drasticamente il tempo perso in timeout su requests
-        print(f"      [*] Probing veloce di {len(candidates)} candidati via Httpx...", file=sys.stderr)
+        # Migliorato: Iniettiamo l'header Host (e SNI) per evitare drop silenti da parte di LB/WAF.
+        print(f"      [*] Probing intelligente di {len(candidates)} candidati via Httpx (Host: {base_domain})...", file=sys.stderr)
         probe_urls = []
         for ip in candidates:
-            # Opt: Testiamo sia http che https per l'IP nudo
             probe_urls.append(f"https://{ip}/")
             probe_urls.append(f"http://{ip}/")
             
         validator = HttpxTool()
-        alive_probe_urls = set(validator.verify_urls(probe_urls))
+        # Header di base per il probe: proviamo con Host ed eventualmente gli altri se la lista è piccola
+        # Per speed, usiamo l'Host principale.
+        probe_headers = {"Host": base_domain}
+        
+        # Eseguiamo il probe. Nota: httpx userà l'IP come target ma invierà l'header Host corretto.
+        alive_probe_urls = set(validator.verify_urls(probe_urls, headers=probe_headers))
+        
         # Estraiamo gli IP che hanno almeno un URL vivo
         alive_ips = set()
         for url in alive_probe_urls:
             p = urlparse(url)
-            alive_ips.add(p.hostname)
+            # Se httpx ha seguito redirect a domini esterni, lo ignoriamo e prendiamo l'hostname originale (IP)
+            hostname = p.hostname
+            # Se hostname sembra un IP, lo aggiungiamo
+            if hostname and (hostname.replace('.', '').isdigit() or ':' in hostname):
+                alive_ips.add(hostname)
+            
+        if not alive_ips:
+            # Se fallisce con Host header, facciamo un ultimissimo tentativo veloce con X-Forwarded-Host 
+            # (Raro che serva nel probe ma utile se il LB droppa Host diretti)
+            print(f"      [*] Host header fallito, tentativo fallback con routing headers...", file=sys.stderr)
+            probe_headers_alt = {"X-Forwarded-Host": base_domain}
+            alive_probe_urls_alt = set(validator.verify_urls(probe_urls, headers=probe_headers_alt))
+            for url in alive_probe_urls_alt:
+                p = urlparse(url)
+                hostname = p.hostname
+                if hostname and (hostname.replace('.', '').isdigit() or ':' in hostname):
+                    alive_ips.add(hostname)
             
         if not alive_ips:
             return []
@@ -334,17 +355,14 @@ class OriginIpTool(Tool):
         return False
         
     def _extract_title(self, html_content: str) -> str:
-        """Estrae velocemente il <title> da un documento HTML senza parse pesanti"""
+        """Estrae velocemente il <title> da un documento HTML senza parse pesanti (case-insensitive)"""
         if not html_content:
             return ""
-        start = html_content.find("<title>")
-        if start == -1:
-            start = html_content.find("<TITLE>")
+        lower = html_content.lower()
+        start = lower.find("<title>")
         if start != -1:
             start += 7
-            end = html_content.find("</title>", start)
-            if end == -1:
-                end = html_content.find("</TITLE>", start)
+            end = lower.find("</title>", start)
             if end != -1:
                 return html_content[start:end].strip()
         return ""

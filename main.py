@@ -25,6 +25,7 @@ from tools.spider_tool import SpiderTool
 from tools.js_analyzer_tool import JsAnalyzerTool
 from tools.content_discovery_tool import ContentDiscoveryTool
 from tools.dns_manager_tool import DnsManagerTool
+from tools.wordlist_manager_tool import WordlistManagerTool
 
 class TeeStream:
     """Duplica la scrittura su uno stream originale e su un file di log."""
@@ -158,15 +159,18 @@ def get_hostname_from_url(url: str) -> str:
     Esempio: "example.com:8080" -> "example.com"
     """
     if "://" not in url:
-        return urlparse("//" + url).hostname
-    return urlparse(url).hostname
+        hostname = urlparse("//" + url).hostname
+    else:
+        hostname = urlparse(url).hostname
+    # Fallback: se urlparse non riesce, estraiamo manualmente
+    return hostname or url.split(":")[0].split("/")[0]
 
 # ==========================================
 # FASI DI SCANSIONE (SCANNING PHASES)
 # Ogni fase incapsula logiche e tool specifici.
 # ==========================================
 
-def run_subdomain_enumeration_phase(domains: List[str], passive_subdomains: dict, params: dict, args: argparse.Namespace, dns_manager: DnsManagerTool, python_dns_resolvers: list) -> Tuple[List[str], dict]:
+def run_subdomain_enumeration_phase(domains: List[str], passive_subdomains: dict, params: dict, args: argparse.Namespace, dns_manager: DnsManagerTool, python_dns_resolvers: list, wl_manager: WordlistManagerTool) -> Tuple[List[str], dict]:
     """
     Fase 1: Enumerazione dei Sottodomini.
     Scoperta attiva di nuovi domini associati ai target originali.
@@ -177,16 +181,23 @@ def run_subdomain_enumeration_phase(domains: List[str], passive_subdomains: dict
     print("\n--- [Fase 1] Subdomain Enumeration Phase ---", file=sys.stderr)
     
     # 1. Bruteforce Attivo
-    all_dns_resolvers = dns_manager.get_resolvers(max_count=0)
+    all_dns_resolvers = dns_manager.get_resolvers(max_count=0, wl_manager=wl_manager)
     subdomain_tool = SubdomainEnumTool(dns_resolvers=all_dns_resolvers)
+    
+    # Iniezione wordlist se non specificata
+    if not params.get("subdomains_wordlist") and not params.get("wordlist"):
+        params["subdomains_wordlist"] = wl_manager.get_wordlist("subdomains", params.get("scan_type", "fast"))
+
     subdomain_tool.run(domains, params)
     subdomain_results = safe_load_json(subdomain_tool.get_results())
     
     # Raccoglie i domini base + quelli appena scoperti
-    discovered_domains = set(domains)
+    discovered_domains = list(domains)
     for seed, result in subdomain_results.items():
         if "discovered_subdomains" in result:
-            discovered_domains.update(result["discovered_subdomains"])
+            for sub in result["discovered_subdomains"]:
+                if sub not in discovered_domains:
+                    discovered_domains.append(sub)
     
     # 2. Generazione e validazione delle Permutazioni
     perm_params_base = {
@@ -198,7 +209,7 @@ def run_subdomain_enumeration_phase(domains: List[str], passive_subdomains: dict
         perm_params_base["flags"].extend(["-limit", "5000"]) 
     
     permutation_tool = PermutationTool()
-    all_valid_permutations = set()
+    all_valid_permutations = [] # Lista per preservare l'ordine di scoperta
 
     for seed, result in subdomain_results.items():
         if "error" in result:
@@ -218,7 +229,7 @@ def run_subdomain_enumeration_phase(domains: List[str], passive_subdomains: dict
             continue
         
         # Esegue AlterX
-        permutation_tool.run(group_domains, perm_params_base)
+        permutation_tool.run(group_domains, perm_params_base, wl_manager=wl_manager)
         perm_results = safe_load_json(permutation_tool.get_results())
 
         # Estrae i candidati da validare
@@ -228,19 +239,22 @@ def run_subdomain_enumeration_phase(domains: List[str], passive_subdomains: dict
                 if "permutations" in p_res:
                     candidates.update(p_res["permutations"])
         
-        # Esclude i domini che già conosciamo essere validi
-        candidates -= set(discovered_domains)
+        # Esclude i domini che già conosciamo essere validi (utilizziamo dict.fromkeys per deduplicare preservando l'ordine se necessario, qui candidates è già un set)
+        candidates_to_resolve = [c for c in candidates if c not in discovered_domains]
         
-        # Valida le restanti permutazioni con PureDNS (Resolve)
-        if candidates:
+        # Valida le restanti permutazioni con PureDNS (Resolve) rispettando i rate limit
+        if candidates_to_resolve:
             perm_resolve_tool = SubdomainEnumTool(dns_resolvers=python_dns_resolvers)
-            perm_resolve_tool.run(list(candidates), {"method": "resolve"})
+            resolve_params = {**params, "method": "resolve"}
+            perm_resolve_tool.run(list(candidates_to_resolve), resolve_params)
             resolve_results = safe_load_json(perm_resolve_tool.get_results())
             
             if "resolved_domains" in resolve_results:
                 valid = resolve_results["resolved_domains"]["domains"]
                 print(f"  [+] {len(valid)} new valid subdomains for {seed}", file=sys.stderr)
-                all_valid_permutations.update(valid)
+                for v in valid:
+                    if v not in all_valid_permutations:
+                        all_valid_permutations.append(v)
                 
                 # Associa le permutazioni trovate al seed originario per il JSON finale
                 if "permutations" not in subdomain_results[seed]:
@@ -249,7 +263,9 @@ def run_subdomain_enumeration_phase(domains: List[str], passive_subdomains: dict
         
     if all_valid_permutations:
         print(f"Permutation Scanning Total: trovati {len(all_valid_permutations)} nuovi sottodomini validi.", file=sys.stderr)
-        discovered_domains.update(all_valid_permutations)
+        for p in all_valid_permutations:
+            if p not in discovered_domains:
+                discovered_domains.append(p)
     else:
         print("Nessuna nuova permutazione valida trovata.", file=sys.stderr)
 
@@ -374,7 +390,7 @@ def run_port_scanning_phase(safe_targets: List[str], domain_ip_map: dict, params
                 
                 # Se aperta (o filtrata ma potenzialmente aperta) e identificata come web service
                 if state in ["open", "filtered", "open|filtered"]:
-                    is_web_service = "http" in name or "https" in name or "ssl" in name or port in [80, 443, 8080, 8443]
+                    is_web_service = "http" in name or "https" in name or "ssl" in name or int(port) in [80, 443, 8080, 8443]
                     if is_web_service:
                         # Ricostruiamo gli URI associando la porta IP al dominio originario
                         associated_domains = ip_to_domains.get(nmap_ip, [])
@@ -422,7 +438,7 @@ def run_web_recon_phase(web_targets: set, params: dict, target_params: dict, arg
     return httpx_results, alive_web_targets, nuclei_results
 
 
-def run_content_discovery_phase(alive_web_targets: List[str], httpx_results: dict, params: dict, target_params: dict, args: argparse.Namespace) -> Tuple[dict, dict, dict]:
+def run_content_discovery_phase(alive_web_targets: List[str], httpx_results: dict, params: dict, target_params: dict, args: argparse.Namespace, wl_manager: WordlistManagerTool) -> Tuple[dict, dict, dict]:
     """
     Fase 5: Content Discovery & JS Analysis.
     Usa Katana per spiderare le pagine, JSLuice per estrarre endpoints dai Javascript
@@ -459,8 +475,9 @@ def run_content_discovery_phase(alive_web_targets: List[str], httpx_results: dic
     def normalize_url(u):
         if not u: return ""
         u = u.lower().rstrip('/')
-        if u.startswith('http://') and ':80' in u: u = u.replace(':80', '')
-        if u.startswith('https://') and ':443' in u: u = u.replace(':443', '')
+        # Rimuovi solo le porte default esatte (:80 per http, :443 per https)
+        u = re.sub(r'^(http://[^/:]+):80(/|$)', r'\1\2', u)
+        u = re.sub(r'^(https://[^/:]+):443(/|$)', r'\1\2', u)
         return u
 
     verified_pool_norm = {normalize_url(u) for u in verified_urls}
@@ -545,8 +562,12 @@ def run_content_discovery_phase(alive_web_targets: List[str], httpx_results: dic
     # 3. Active Fuzzing con FFUF arricchito dai dati statici
     skip_content_discovery = args.skip_content_discovery or params.get('skip_content_discovery') or params.get('skip-content-discovery')
     if not skip_content_discovery:
+        # Iniezione wordlist se non specificata
+        if not params.get("wordlist"):
+            params["wordlist"] = wl_manager.get_wordlist("content_discovery", params.get("scan_type", "fast"))
+        
         c_discovery_tool = ContentDiscoveryTool()
-        c_discovery_tool.run(alive_web_targets, params, httpx_results=httpx_results, target_params=target_params, dynamic_wordlists=dynamic_wordlists)
+        c_discovery_tool.run(alive_web_targets, params, httpx_results=httpx_results, target_params=target_params, dynamic_wordlists=dynamic_wordlists, wl_manager=wl_manager)
         c_discovery_results = safe_load_json(c_discovery_tool.get_results())
     else:
         print("    [!] Salto Content Discovery (FFUF) come richiesto da parametro/flag.", file=sys.stderr)
@@ -554,7 +575,7 @@ def run_content_discovery_phase(alive_web_targets: List[str], httpx_results: dic
     return spider_results, js_results, c_discovery_results
 
 
-def run_final_enumeration_phase(web_targets: set, origin_results: dict, grouped_domains: dict, domain_ip_map: dict, python_dns_resolvers: list, params: dict, target_params: dict) -> dict:
+def run_final_enumeration_phase(web_targets: set, origin_results: dict, grouped_domains: dict, domain_ip_map: dict, python_dns_resolvers: list, params: dict, target_params: dict, wl_manager: WordlistManagerTool) -> dict:
     """
     Fase 6: Enumerazione Finale e VHost Scan.
     Incrocia i dati dell'Host con i risultati origin_ip per trovare server protetti dietro proxy.
@@ -569,6 +590,10 @@ def run_final_enumeration_phase(web_targets: set, origin_results: dict, grouped_
         for sub in subs:
             domain_to_base[sub] = base
         domain_to_base[base] = base
+
+    # Iniezione wordlist vhost se non specificata
+    if not params.get("vhost_wordlist"):
+        params["vhost_wordlist"] = wl_manager.get_wordlist("vhosts")
 
     # VHost Enumeration
     vhost_tool = VhostEnumTool(dns_resolvers=python_dns_resolvers)
@@ -597,6 +622,7 @@ def main():
     parser.add_argument('--use-doh', action='store_true', help='Use DNS-over-HTTPS for final validation')
     parser.add_argument('--dns-proxy', type=str, help='Path to a txt file containing a list of proxies (HTTP/SOCKS5) for DoH')
     parser.add_argument('--output-dir', type=str, help='Output directory for scan results (default: results/).', default=None)
+    parser.add_argument('--update-wordlists', action='store_true', help='Force update of Assetnote wordlists')
     
     # Flags for JSON parameter overrides
     parser.add_argument('--scan-type', type=str, choices=['fast', 'accurate', 'comprehensive', 'stealth'], help='Scan aggressiveness profile')
@@ -606,6 +632,7 @@ def main():
     parser.add_argument('--max-wildcards', type=int, help='AlterX wildcard variable limit')
     parser.add_argument('--timing', type=str, choices=['normal', 'polite'], help='Nmap timing profile')
     parser.add_argument('--max-rate', type=int, help='Packet rate limit (Nmap/Nuclei)')
+    parser.add_argument('--max-rate-dns', type=int, help='DNS query rate limit (Subdomain Enumeration)')
     parser.add_argument('--skip-content-discovery', action='store_true', default=None, help='Skip content discovery phase')
     parser.add_argument('--no-skip-content-discovery', action='store_false', dest='skip_content_discovery', help='Force content discovery execution')
     parser.add_argument('--skip-nuclei', action='store_true', default=None, help='Skip Nuclei scanning phase')
@@ -664,6 +691,7 @@ def main():
         'max_wildcards': args.max_wildcards,
         'timing': args.timing,
         'max_rate': args.max_rate,
+        'max_rate_dns': args.max_rate_dns,
         'skip_content_discovery': args.skip_content_discovery,
         'skip_nuclei': args.skip_nuclei,
         'recursion_depth': args.recursion_depth,
@@ -702,12 +730,26 @@ def main():
     _original_stderr = sys.stderr
     sys.stderr = TeeStream(_original_stderr, _stderr_log_file)
 
+    # Registra cleanup per garantire chiusura file anche in caso di crash non gestito
+    import atexit
+    def _cleanup_stderr():
+        try:
+            sys.stderr = _original_stderr
+            _stderr_log_file.close()
+        except Exception:
+            pass
+    atexit.register(_cleanup_stderr)
+
     # Salva debug info (subito, prima che la scansione parta)
     save_debug_info(scan_dir, args, params, domains, start_time)
 
+    # Inizializzatore Wordlist Manager (Deve precedere DNS per fornire i resolver centralizzati)
+    wl_manager = WordlistManagerTool()
+    wl_manager.run(params={"update_wordlists": args.update_wordlists})
+
     # Inizializzatore DNS Pool Manager
     dns_manager = DnsManagerTool()
-    python_dns_resolvers = dns_manager.get_resolvers(max_count=50)
+    python_dns_resolvers = dns_manager.get_resolvers(max_count=50, wl_manager=wl_manager)
 
     # ----------------------------------------------------
     #  B. ESECUZIONE FASI ATTIVE E PASSIVE (PIPELINE)
@@ -716,7 +758,7 @@ def main():
     # ==== FASE 1: Subdomain Enumeration ====
     t1_start = time.time()
     domains, subdomain_results = run_subdomain_enumeration_phase(
-        domains, passive_subdomains, params, args, dns_manager, python_dns_resolvers
+        domains, passive_subdomains, params, args, dns_manager, python_dns_resolvers, wl_manager
     )
     phase_timings["subdomain_enumeration"] = round(time.time() - t1_start, 2)
     
@@ -769,14 +811,14 @@ def main():
     # ==== FASE 5: Content Discovery & App layer analysis (Katana/Jsluice/Ffuf) ====
     t5_start = time.time()
     spider_results, js_results, c_discovery_results = run_content_discovery_phase(
-        alive_web_targets, httpx_results, params, target_params, args
+        alive_web_targets, httpx_results, params, target_params, args, wl_manager
     )
     phase_timings["content_discovery"] = round(time.time() - t5_start, 2)
 
     # ==== FASE 6: Virtual Hosts Enumeration (Nascosti su reverse proxies) ====
     t6_start = time.time()
     vhost_results = run_final_enumeration_phase(
-        web_targets, origin_results, grouped_domains, domain_ip_map, python_dns_resolvers, params, target_params
+        web_targets, origin_results, grouped_domains, domain_ip_map, python_dns_resolvers, params, target_params, wl_manager
     )
     phase_timings["vhost_enumeration"] = round(time.time() - t6_start, 2)
 
@@ -882,7 +924,7 @@ def main():
 
     # Assegnazione VirtualHost Mismatch
     for url, vhost_data in vhost_results.items():
-        base_domain = url.split(':')[0].replace('http://', '').replace('https://', '')
+        base_domain = get_hostname_from_url(url)
         if base_domain in final_results:
             final_results[base_domain]["vhost_enum"][url] = vhost_data
 
@@ -939,7 +981,6 @@ def main():
             f.write(json_output + '\n')
     except Exception:
         pass
-
     # Chiudi il tee di stderr e ripristina lo stream originale
     print(f"Scan completato. Tutti i file della run sono in: {scan_dir}", file=sys.stderr)
     sys.stderr = _original_stderr

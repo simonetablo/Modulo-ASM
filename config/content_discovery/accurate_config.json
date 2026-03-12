@@ -1,7 +1,7 @@
 {
     "threads": 40,
     "rate": 50,
-    "timeout_minutes": 8,
+    "timeout_minutes": 20,
     "recursion_depth": 1,
     "match_codes": "200,204,301,302,307,401,403,405",
     "max_workers": 3,

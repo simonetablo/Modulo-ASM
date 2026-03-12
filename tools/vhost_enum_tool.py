@@ -10,7 +10,7 @@ import re
 import tldextract
 import concurrent.futures
 from typing import List, Dict, Any
-from .base_tool import Tool
+from .base_tool import Tool, BASE_DIR
 
 class VhostEnumTool(Tool):
     """
@@ -28,7 +28,7 @@ class VhostEnumTool(Tool):
         "flags": ["-ac", "-mc", "all", "-t", "40", "-timeout", "5"],
         "routing_headers": ["Host"],
         "max_workers_resolve": 10,
-        "max_workers_scan": 3,
+        "max_workers_scan": 10,
         "process_timeout": 1200
     }
 
@@ -77,7 +77,7 @@ class VhostEnumTool(Tool):
         file_config = self.load_config("vhost_enum", scan_type)
         self._config = {**self.DEFAULT_CONFIG, **file_config}
 
-        wordlist = params.get("vhost_wordlist") or params.get("wordlist") or self._config.get("wordlist") or "wordlists/vhosts.txt"
+        wordlist = params.get("vhost_wordlist") or params.get("wordlist") or self._config.get("wordlist") or os.path.join(BASE_DIR, "wordlists/vhosts.txt")
         
         if not os.path.exists(wordlist):
             print(f"ATTENZIONE: Wordlist vhost '{wordlist}' non trovata.", file=sys.stderr)
@@ -128,7 +128,7 @@ class VhostEnumTool(Tool):
             
             print(f"VHost scanning {len(ip_groups)} unique IP/port/base_domain combos for {len(group_domains)} targets (timing={timing}, max_rate={max_rate})", file=sys.stderr)
 
-            with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=self._config.get("max_workers_scan", 10)) as executor:
                 futures = []
                 for (t_ips, port, base_domain), targets_info in ip_groups.items():
                     futures.append(
@@ -155,9 +155,9 @@ class VhostEnumTool(Tool):
             # Estrae il dominio base dal target (es. "example.com:443" -> "example.com")
             base_domain = target.split(':')[0].replace('http://', '').replace('https://', '')
 
-            params = target_params.get(base_domain, {})
-            timing = params.get('timing', 'normal')
-            max_rate = params.get('max_rate')
+            domain_params = target_params.get(base_domain, {})
+            timing = domain_params.get('timing', 'normal')
+            max_rate = domain_params.get('max_rate')
 
             key = (timing, max_rate)
             if key not in groups:
@@ -232,7 +232,9 @@ class VhostEnumTool(Tool):
             if header_name in config_headers:
                 routing_headers.append((header_name, header_format.format(domain=base_domain)))
         
-        for target_ip in target_ips:
+        # Per ogni IP, un task parallelo
+        def _run_ip_scan(target_ip):
+            ip_discovered = []
             # Opt: Format IPv6 address safely if present
             formatted_ip = f"[{target_ip}]" if ":" in target_ip else target_ip
             target_url = f"{scheme}://{formatted_ip}:{port}/"
@@ -241,12 +243,7 @@ class VhostEnumTool(Tool):
                 cmd = list(base_args)
                 
                 # Opt: Always pass a valid SNI on HTTPS proxy connections
-                # Server / CDNs will drop requests to absolute IPs without an SNI matching a known config
                 if scheme == "https":
-                    # Usiamo il base_domain (es. target.com) invece del sottodominio specifico, 
-                    # perchè il fuzzing lavora allo stesso livello (FUZZ.target.com) ed il certificato 
-                    # installato è spesso un Wildcard (*.target.com). Passare un sottodominio come 
-                    # SNI e chiederne un altro via Host Header triggera blocchi WAF per SNI-Mismatch.
                     cmd.extend(["-sni", base_domain])
                 
                 if header_name != "Host":
@@ -258,7 +255,7 @@ class VhostEnumTool(Tool):
                     "-w", wordlist
                 ])
 
-                print(f"VHost enum su {representative_domain} (-> {target_ip}:{port}) via {header_name} (gruppo di {len(targets_info)} target)", file=sys.stderr)
+                print(f"VHost enum su {representative_domain} (-> {target_ip}:{port}) via {header_name}", file=sys.stderr)
 
                 try:
                     process = subprocess.run(
@@ -274,15 +271,28 @@ class VhostEnumTool(Tool):
                     for v in discovered:
                         v["target_ip_used"] = target_ip
                         v["bypassed_via"] = header_name
-                    all_discovered.extend(discovered)
-
+                    
                     if discovered:
-                        print(f"  [+] {len(discovered)} vhost trovati su {representative_domain} (IP: {target_ip}) via {header_name} per {len(targets_info)} target", file=sys.stderr)
+                        ip_discovered.extend(discovered)
+                        # Short-circuit logic: se abbiamo trovato qualcosa, ci fermiamo solo se il profilo non è 'deep'
+                        if scan_type not in ("accurate", "comprehensive"):
+                            print(f"  [+] Trovati {len(discovered)} vhost via {header_name}. Short-circuit attivo per profilo {scan_type}.", file=sys.stderr)
+                            break
+                        else:
+                            print(f"  [+] Trovati {len(discovered)} vhost via {header_name}. Continuo con gli altri header per profilo {scan_type}.", file=sys.stderr)
 
                 except subprocess.TimeoutExpired:
                     print(f"Timeout durante vhost enum su {representative_domain} (IP: {target_ip} Header: {header_name})", file=sys.stderr)
                 except Exception as e:
                     print(f"Eccezione durante vhost enum su {representative_domain}: {str(e)}", file=sys.stderr)
+            
+            return ip_discovered
+
+        # Parallelizziamo solo per IP (loop esterno)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=5) as inner_executor:
+            results = list(inner_executor.map(_run_ip_scan, target_ips))
+            for discovered_list in results:
+                all_discovered.extend(discovered_list)
 
         unique_vhosts = {}
         for v in all_discovered:
@@ -304,46 +314,61 @@ class VhostEnumTool(Tool):
 
     def _parse_ffuf_output(self, stdout: str, base_domain: str) -> List[Dict[str, Any]]:
         """
-        Parsa l'output JSON di ffuf ed estrae i vhost scoperti.
-        
-        ffuf con -json restituisce un oggetto JSON con campo "results" contenente un array di match. 
-        Ogni match ha: input (FUZZ value), status, length, words, lines, url, host.
-        
-        Returns:
-            Lista di dizionari con info sui vhost trovati.
+        Parsa l'output di ffuf ed estrae i vhost scoperti.
+        Supporta sia il formato JSON standard (un unico oggetto) che JSONL (un oggetto per riga).
         """
-        vhosts = []
-
         if not stdout or not stdout.strip():
-            return vhosts
+            return []
+
+        vhosts_raw = []
+        content = stdout.strip()
 
         try:
-            data = json.loads(stdout)
-            results = data.get("results", [])
-
-            for result in results:
-                fuzz_value = result.get("input", {}).get("FUZZ", "")
-                if not fuzz_value:
+            # 1. Tentativo parsing come singolo oggetto JSON (formato standard ffuf -json)
+            # Rimuove eventuale rumore iniziale se presente
+            json_start = content.find('{')
+            if json_start != -1:
+                try:
+                    data = json.loads(content[json_start:])
+                    vhosts_raw = data.get("results", [])
+                except json.JSONDecodeError as e:
+                    # Se l'errore è "Extra data", procediamo con il parsing linea per linea
+                    if "Extra data" in str(e):
+                        raise e # Lo rilancia per andare nel blocco except esterno
+                    else:
+                        print(f" [!] Errore parsing JSON unico: {e}", file=sys.stderr)
+            
+        except json.JSONDecodeError:
+            # 2. Fallback: Parsing JSONL (un oggetto JSON per riga)
+            # Utile se ffuf è configurato diversamente o se ci sono multipli oggetti nel buffer
+            for line in content.splitlines():
+                line = line.strip()
+                if not line.startswith('{'):
+                    continue
+                try:
+                    vhosts_raw.append(json.loads(line))
+                except json.JSONDecodeError:
                     continue
 
-                vhost_name = f"{fuzz_value}.{base_domain}"
+        # Normalizzazione dei risultati
+        final_vhosts = []
+        for result in vhosts_raw:
+            fuzz_value = result.get("input", {}).get("FUZZ", "")
+            if not fuzz_value:
+                continue
 
-                vhost_info = {
-                    "vhost": vhost_name,
-                    "status_code": result.get("status", 0),
-                    "content_length": result.get("length", 0),
-                    "content_words": result.get("words", 0),
-                    "content_lines": result.get("lines", 0),
-                    "url": result.get("url", ""),
-                    "redirect_location": result.get("redirectlocation", "")
-                }
-                vhosts.append(vhost_info)
+            vhost_name = f"{fuzz_value}.{base_domain}"
+            final_vhosts.append({
+                "vhost": vhost_name,
+                "status_code": result.get("status", 0),
+                "content_length": result.get("length", 0),
+                "content_words": result.get("words", 0),
+                "content_lines": result.get("lines", 0),
+                "url": result.get("url", ""),
+                "redirect_location": result.get("redirectlocation", "")
+            })
 
-        except json.JSONDecodeError:
-            # ffuf potrebbe restituire output non-JSON in caso di errore
-            print(f"Errore parsing JSON output ffuf", file=sys.stderr)
-
-        return vhosts
+        return final_vhosts
 
     def get_results(self) -> str:
         """

@@ -1,6 +1,6 @@
 import json
 import ipaddress
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Union
 from .base_tool import Tool
 
 class SafetyValidatorTool(Tool):
@@ -83,7 +83,7 @@ class SafetyValidatorTool(Tool):
                 "reason": "Invalid IP address format"
             }
     
-    def _classify_ip(self, ip: ipaddress.IPv4Address) -> str:
+    def _classify_ip(self, ip: Union[ipaddress.IPv4Address, ipaddress.IPv6Address]) -> str:
         """Classifica il tipo di IP."""
         if ip.is_private:
             return "private"
@@ -100,7 +100,7 @@ class SafetyValidatorTool(Tool):
         else:
             return "unknown"
     
-    def _get_non_scannable_reason(self, ip: ipaddress.IPv4Address) -> str:
+    def _get_non_scannable_reason(self, ip: Union[ipaddress.IPv4Address, ipaddress.IPv6Address]) -> str:
         """Restituisce il motivo per cui un IP non è scansionabile."""
         if ip.is_private:
             return "Private IP address"

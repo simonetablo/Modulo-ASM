@@ -12,6 +12,6 @@
         "Host"
     ],
     "max_workers_resolve": 10,
-    "max_workers_scan": 3,
+    "max_workers_scan": 5,
     "process_timeout": 1200
 }

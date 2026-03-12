@@ -1,0 +1,30 @@
+{
+   "freshness_days": 30,
+   "sources": {
+      "subdomains": {
+         "fast": "https://raw.githubusercontent.com/danielmiessler/SecLists/refs/heads/master/Discovery/DNS/subdomains-top1million-5000.txt",
+         "accurate": "https://raw.githubusercontent.com/danielmiessler/SecLists/refs/heads/master/Discovery/DNS/subdomains-top1million-20000.txt",
+         "comprehensive": "https://raw.githubusercontent.com/danielmiessler/SecLists/refs/heads/master/Discovery/DNS/subdomains-top1million-110000.txt"
+      },
+      "vhosts": {
+         "default": "https://wordlists-cdn.assetnote.io/data/manual/virtual-host-scanning.txt"
+      },
+      "content_discovery": {
+         "general": "https://wordlists-cdn.assetnote.io/data/manual/raft-medium-directories-lowercase.txt",
+         "php": "https://wordlists-cdn.assetnote.io/data/manual/php.txt",
+         "jsp": "https://wordlists-cdn.assetnote.io/data/manual/jsp.txt",
+         "asp": "https://wordlists-cdn.assetnote.io/data/manual/asp_lowercase.txt",
+         "js": "https://wordlists-cdn.assetnote.io/data/automated/httparchive_js_2026_02_27.txt",
+         "apiroutes": "https://wordlists-cdn.assetnote.io/data/automated/httparchive_apiroutes_2026_02_27.txt",
+         "cgi": "https://wordlists-cdn.assetnote.io/data/automated/httparchive_cgi_pl_2026_02_27.txt",
+         "html": "https://wordlists-cdn.assetnote.io/data/automated/httparchive_html_htm_2026_02_27.txt"
+      },
+      "dns": {
+         "resolvers": "https://raw.githubusercontent.com/trickest/resolvers/main/resolvers.txt",
+         "trusted": "https://raw.githubusercontent.com/trickest/resolvers/main/resolvers-trusted.txt"
+      },
+      "permutations": {
+         "default": "https://wordlists-cdn.assetnote.io/data/manual/raft-small-words-lowercase.txt"
+      }
+   }
+}

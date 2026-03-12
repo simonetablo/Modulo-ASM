@@ -79,9 +79,9 @@ class NmapTool(Tool):
         groups = {}
         
         for domain in domains:
-            params = target_params.get(domain, {})
-            timing = params.get('timing', 'normal')
-            max_rate = params.get('max_rate')
+            domain_params = target_params.get(domain, {})
+            timing = domain_params.get('timing', 'normal')
+            max_rate = domain_params.get('max_rate')
             
             key = (timing, max_rate)
             if key not in groups:

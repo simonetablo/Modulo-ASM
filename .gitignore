@@ -3,10 +3,14 @@ DOCUMENTAZIONE_TOOL.md
 test_real.json
 asm_results*.json
 venv/
-tests/
+tests/*
 documentation.md
 output_json/
 results/
 appunti.md
 __pycache__/
 *.pyc
+wordlists/
+outputformat.md
+
+

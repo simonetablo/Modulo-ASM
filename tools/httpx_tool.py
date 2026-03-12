@@ -3,7 +3,7 @@ import subprocess
 import sys
 import shutil
 from typing import List, Dict, Any
-from .base_tool import Tool
+from .base_tool import Tool, BASE_DIR
 
 class HttpxTool(Tool):
     """
@@ -28,6 +28,8 @@ class HttpxTool(Tool):
         Inizializza l'HttpxTool.
         """
         super().__init__()
+        # Inizializza config con default (Fix #11)
+        self._config = self.DEFAULT_CONFIG.copy()
         # Verifica se l'eseguibile httpx è nel PATH
         self.httpx_path = shutil.which("httpx")
         if not self.httpx_path:
@@ -78,9 +80,9 @@ class HttpxTool(Tool):
             # Estrae il dominio base dall'URL (es. "example.com:443" -> "example.com")
             base_domain = target.split(':')[0].replace('http://', '').replace('https://', '')
             
-            params = target_params.get(base_domain, {})
-            timing = params.get('timing', 'normal')
-            max_rate = params.get('max_rate')
+            domain_params = target_params.get(base_domain, {})
+            timing = domain_params.get('timing', 'normal')
+            max_rate = domain_params.get('max_rate')
             
             key = (timing, max_rate)
             if key not in groups:
@@ -170,13 +172,14 @@ class HttpxTool(Tool):
             for target in domains:
                 self.results[target] = {"error": str(e)}
 
-    def verify_urls(self, urls: List[str]) -> List[str]:
+    def verify_urls(self, urls: List[str], headers: Dict[str, str] = None) -> List[str]:
         """
         Valida una lista di URL controllando se sono vivi (status 2xx/3xx).
         Usa un profilo super-veloce di httpx.
         
         Args:
             urls (List[str]): Lista di URL da verificare.
+            headers (Dict[str, str]): Eventuali header da aggiungere alla verifica.
             
         Returns:
             List[str]: Lista di URL che hanno risposto positivamente.
@@ -184,10 +187,8 @@ class HttpxTool(Tool):
         if not self.httpx_path or not urls:
             return []
 
-        # Carica config per i parametri di verify
-        config = self.load_config("httpx")
-        if not config:
-            config = self.DEFAULT_CONFIG
+        # Carica config per i parametri di verify (Fix #12)
+        config = {**self.DEFAULT_CONFIG, **self.load_config("httpx")}
         
         verify_threads = str(config.get("verify_threads", 150))
         verify_timeout = str(config.get("verify_timeout", 5))
@@ -202,6 +203,11 @@ class HttpxTool(Tool):
             "-mc", verify_match_codes,
             "-follow-redirects"
         ]
+
+        # Aggiunta Header custom se forniti
+        if headers:
+            for h_name, h_val in headers.items():
+                cmd.extend(["-H", f"{h_name}: {h_val}"])
 
         verified = []
         input_data = "\n".join(urls)
